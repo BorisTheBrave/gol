@@ -147,8 +147,25 @@ def step4(x: torch.Tensor, BLOCK_SIZE: int = None):
     step4_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE)
 
     return output
-    
 
+# %%
+import torch
+from torch.utils.cpp_extension import load_inline
+
+
+ext = load_inline(
+    name="gol_ext",
+    cpp_sources="",            # no separate C++ binding file
+    cuda_sources=[open("kernel.cpp").read()],   # contains both kernel and PYBIND11 module
+    with_cuda=True,
+    extra_cuda_cflags=["-O3"],
+    verbose=True,
+)
+
+def step5(x: torch.Tensor):
+    output = torch.empty_like(x)
+    ext.gol(x, output)
+    return output
 
 # %%
 
@@ -190,7 +207,7 @@ def visualize_heatmap(x: torch.Tensor, title: str = "Heatmap"):
 
 x = torch.tensor([[0, 0, 0, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 0, 0, 0]]).to(torch.int8).to(device)
 visualize_heatmap(x)
-x = step4(x)
+x = step5(x)
 visualize_heatmap(x)
 
 # %%
@@ -201,8 +218,8 @@ visualize_heatmap(x)
         x_names=['N'],
         x_vals=[512 * i for i in range(2, 16, 2)],
         line_arg='provider',
-        line_vals=['torch', 'compiled_torch', 'triton'],
-        line_names=['Torch', 'Compiled Torch', 'Triton'],
+        line_vals=['torch', 'compiled_torch', 'triton', 'cuda'],
+        line_names=['Torch', 'Compiled Torch', 'Triton', 'CUDA'],
         ylabel='ms',
         plot_name='gol',
         args={}
@@ -218,12 +235,8 @@ def benchmark(provider, N):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: step2(x), quantiles=quantiles, rep=500)
     elif provider == 'triton':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: step4(x), quantiles=quantiles, rep=500)
-    elif provider == 'torch_f16':
-        x = x.to(torch.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step1_f16(x), quantiles=quantiles, rep=500)
-    elif provider == 'compiled_torch_f16':
-        x = x.to(torch.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step2_f16(x), quantiles=quantiles, rep=500)
+    elif provider == 'cuda':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step5(x), quantiles=quantiles, rep=500)
     else:
         raise ValueError(f"Invalid provider: {provider}")
     return ms, min_ms, max_ms
@@ -306,3 +319,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
