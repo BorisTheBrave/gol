@@ -166,6 +166,24 @@ def step5(x: torch.Tensor):
     output = torch.empty_like(x)
     ext.gol(x, output)
     return output
+# %%
+import torch
+from torch.utils.cpp_extension import load_inline
+
+
+ext2 = load_inline(
+    name="gol2_ext",
+    cpp_sources="",            # no separate C++ binding file
+    cuda_sources=[open("kernel2.cpp").read()],   # contains both kernel and PYBIND11 module
+    with_cuda=True,
+    extra_cuda_cflags=["-O3"],
+    verbose=True,
+)
+
+def step6(x: torch.Tensor):
+    output = torch.empty_like(x)
+    ext2.gol(x, output)
+    return output
 
 # %%
 
@@ -207,7 +225,7 @@ def visualize_heatmap(x: torch.Tensor, title: str = "Heatmap"):
 
 x = torch.tensor([[0, 0, 0, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 0, 0, 0]]).to(torch.int8).to(device)
 visualize_heatmap(x)
-x = step5(x)
+x = step6(x)
 visualize_heatmap(x)
 
 # %%
@@ -218,8 +236,8 @@ visualize_heatmap(x)
         x_names=['N'],
         x_vals=[512 * i for i in range(2, 16, 2)],
         line_arg='provider',
-        line_vals=['torch', 'compiled_torch', 'triton', 'cuda'],
-        line_names=['Torch', 'Compiled Torch', 'Triton', 'CUDA'],
+        line_vals=['torch', 'compiled_torch', 'triton', 'cuda', 'cuda2'],
+        line_names=['Torch', 'Compiled Torch', 'Triton', 'CUDA', 'CUDA (shared memory)'],
         ylabel='ms',
         plot_name='gol',
         args={}
@@ -237,6 +255,8 @@ def benchmark(provider, N):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: step4(x), quantiles=quantiles, rep=500)
     elif provider == 'cuda':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: step5(x), quantiles=quantiles, rep=500)
+    elif provider == 'cuda2':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step6(x), quantiles=quantiles, rep=500)
     else:
         raise ValueError(f"Invalid provider: {provider}")
     return ms, min_ms, max_ms
