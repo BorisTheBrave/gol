@@ -151,7 +151,7 @@ def gol_triton_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
         bs = meta['BLOCK_SIZE']
         return (x.shape[0], triton.cdiv(x.shape[1], bs))
     
-    gol_triton_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE)
+    gol_triton_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE, num_warps=4)
 
     return output
 
@@ -207,9 +207,18 @@ def gol_triton_2d(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: i
         triton.cdiv(x.shape[1], BLOCK_SIZE_COL),
     )
 
-    gol_triton_2d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE_ROW=BLOCK_SIZE_ROW, BLOCK_SIZE_COL=BLOCK_SIZE_COL)
+    gol_triton_2d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE_ROW=BLOCK_SIZE_ROW, BLOCK_SIZE_COL=BLOCK_SIZE_COL, num_stages=1)
 
     return output
+
+# %%
+if __name__ == "__main__":
+    x = torch.randint(0, 2, (8096, 8096), device=device, dtype=torch.int8)
+    for i in range(500):
+        output = gol_triton_1d(x)
+    print(output)
+    import sys
+    sys.exit()
 
 # %%
 import torch
@@ -252,6 +261,143 @@ def gol_cuda_shared_memory(x: torch.Tensor):
 
 # %%
 
+
+# %%
+
+@triton.jit
+def gol_triton_bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
+    row_id = tl.program_id(0)
+    col_id = tl.program_id(1)
+
+    offsets0 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) - 1
+    offsets1 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    offsets2 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) + 1
+
+    mask0 = (offsets0 >= 0) & (offsets0 < ((N + 7) // 8))
+    mask1 = (offsets1 >= 0) & (offsets1 < ((N + 7) // 8))
+    mask2 = (offsets2 >= 0) & (offsets2 < ((N + 7) // 8))
+
+    row_ptr = x_ptr + row_id * row_stride
+
+    if row_id > 0:
+        row00 = tl.load(row_ptr + offsets0 - row_stride, mask=mask0, other=0)
+        row01 = tl.load(row_ptr + offsets1 - row_stride, mask=mask1, other=0)
+        row02 = tl.load(row_ptr + offsets2 - row_stride, mask=mask2, other=0)
+    else:
+        row00 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint8)
+        row01 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint8)
+        row02 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint8)
+    row10 = tl.load(row_ptr + offsets0, mask=mask0, other=0)
+    row11 = tl.load(row_ptr + offsets1, mask=mask1, other=0)
+    row12 = tl.load(row_ptr + offsets2, mask=mask2, other=0)
+    if row_id < N - 1:
+        row20 = tl.load(row_ptr + offsets0 + row_stride, mask=mask0, other=0)
+        row21 = tl.load(row_ptr + offsets1 + row_stride, mask=mask1, other=0)
+        row22 = tl.load(row_ptr + offsets2 + row_stride, mask=mask2, other=0)
+    else:
+        row20 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint8)
+        row21 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint8)
+        row22 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint8)
+
+    # Read out all the bits needed
+    v00_7 = (row00 >> 7) & 1
+    v01_0 = (row01 >> 0) & 1
+    v01_1 = (row01 >> 1) & 1
+    v01_2 = (row01 >> 2) & 1
+    v01_3 = (row01 >> 3) & 1
+    v01_4 = (row01 >> 4) & 1
+    v01_5 = (row01 >> 5) & 1
+    v01_6 = (row01 >> 6) & 1
+    v01_7 = (row01 >> 7) & 1
+    v02_0 = (row02 >> 0) & 1
+
+    v10_7 = (row10 >> 7) & 1
+    v11_0 = (row11 >> 0) & 1
+    v11_1 = (row11 >> 1) & 1
+    v11_2 = (row11 >> 2) & 1
+    v11_3 = (row11 >> 3) & 1
+    v11_4 = (row11 >> 4) & 1
+    v11_5 = (row11 >> 5) & 1
+    v11_6 = (row11 >> 6) & 1
+    v11_7 = (row11 >> 7) & 1
+    v12_0 = (row12 >> 0) & 1
+
+    v20_7 = (row20 >> 7) & 1
+    v21_0 = (row21 >> 0) & 1
+    v21_1 = (row21 >> 1) & 1
+    v21_2 = (row21 >> 2) & 1
+    v21_3 = (row21 >> 3) & 1
+    v21_4 = (row21 >> 4) & 1
+    v21_5 = (row21 >> 5) & 1
+    v21_6 = (row21 >> 6) & 1
+    v21_7 = (row21 >> 7) & 1
+    v22_0 = (row22 >> 0) & 1
+
+    sum_0 = v00_7 + v01_0 + v01_1 + v10_7 + v11_0 + v11_1 + v20_7 + v21_1
+    sum_1 = v01_0 + v01_1 + v01_2 + v11_0 + v11_2 + v21_0 + v21_1 + v21_2
+    sum_2 = v01_1 + v01_2 + v01_3 + v11_1 + v11_3 + v21_1 + v21_2 + v21_3
+    sum_3 = v01_2 + v01_3 + v01_4 + v11_2 + v11_4 + v21_2 + v21_3 + v21_4
+    sum_4 = v01_3 + v01_4 + v01_5 + v11_3 + v11_5 + v21_3 + v21_4 + v21_5
+    sum_5 = v01_4 + v01_5 + v01_6 + v11_4 + v11_6 + v21_4 + v21_5 + v21_6
+    sum_6 = v01_5 + v01_6 + v01_7 + v11_5 + v11_7 + v21_5 + v21_6 + v21_7
+    sum_7 = v01_6 + v01_7 + v02_0 + v11_6 + v12_0 + v21_6 + v21_7 + v22_0
+
+    result0 = ((v11_0 == 1) & (sum_0 == 2)) | (sum_0 == 3)
+    result1 = ((v11_1 == 1) & (sum_1 == 2)) | (sum_1 == 3)
+    result2 = ((v11_2 == 1) & (sum_2 == 2)) | (sum_2 == 3)
+    result3 = ((v11_3 == 1) & (sum_3 == 2)) | (sum_3 == 3)
+    result4 = ((v11_4 == 1) & (sum_4 == 2)) | (sum_4 == 3)
+    result5 = ((v11_5 == 1) & (sum_5 == 2)) | (sum_5 == 3)
+    result6 = ((v11_6 == 1) & (sum_6 == 2)) | (sum_6 == 3)
+    result7 = ((v11_7 == 1) & (sum_7 == 2)) | (sum_7 == 3)
+
+
+    result = result0 | (result1 << 1) | (result2 << 2) | (result3 << 3) | (result4 << 4) | (result5 << 5) | (result6 << 6) | (result7 << 7)
+
+    out_offsets = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    out_mask = (out_offsets >= 0) & (out_offsets < ((N + 7) // 8))
+
+    tl.store(out_ptr + row_id * row_stride + out_offsets, result, mask=out_mask)
+
+def gol_triton_bit_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
+    # I don't understand block size tuning yet.
+    # There seems to be a significant performance difference between 4096 and 8192.
+    BLOCK_SIZE = BLOCK_SIZE or 1024
+
+    output = torch.empty_like(x)
+
+    def grid(meta):
+        bs = meta['BLOCK_SIZE']
+        return (x.shape[0], triton.cdiv(x.shape[1], bs))
+    
+    gol_triton_bit_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE, num_warps=4)
+
+    return output
+
+def bit_encode(x: torch.Tensor):
+
+    out = torch.zeros((x.shape[0], triton.cdiv(x.shape[1], 8)), device=x.device, dtype=torch.uint8)
+
+    for i in range(8):
+        s = (x[:, i::8] << i)
+        out[:, 0:s.shape[1]] += s
+    return out
+
+def bit_decode(x: torch.Tensor):
+    out = torch.zeros((x.shape[0], x.shape[1] * 8), device=x.device, dtype=torch.int8)
+    out[:, 0::8] = (x >> 0) & 1
+    out[:, 1::8] = (x >> 1) & 1
+    out[:, 2::8] = (x >> 2) & 1
+    out[:, 3::8] = (x >> 3) & 1
+    out[:, 4::8] = (x >> 4) & 1
+    out[:, 5::8] = (x >> 5) & 1
+    out[:, 6::8] = (x >> 6) & 1
+    out[:, 7::8] = (x >> 7) & 1
+    return out
+
+# %%
+
+
 def visualize_heatmap(x: torch.Tensor, title: str = "Heatmap"):
     if x.dim() != 2:
         raise ValueError(f"Input tensor must be 2D, but got shape {x.shape}")
@@ -290,7 +436,9 @@ def visualize_heatmap(x: torch.Tensor, title: str = "Heatmap"):
 
 x = torch.tensor([[0, 0, 0, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 0, 0, 0]]).to(torch.int8).to(device)
 visualize_heatmap(x)
-x = gol_cuda_shared_memory(x)
+x = bit_encode(x)
+x = gol_triton_bit_1d(x)
+x = bit_decode(x)
 visualize_heatmap(x)
 
 # %%
@@ -299,10 +447,10 @@ visualize_heatmap(x)
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],
-        x_vals=[512 * i for i in range(2, 16, 2)],
+        x_vals=[512 * i for i in range(2, 32, 2)],
         line_arg='provider',
-        line_vals=['torch', 'compiled_torch', 'triton', 'cuda', 'cuda2'],
-        line_names=['Torch', 'Compiled Torch', 'Triton', 'CUDA', 'CUDA (shared memory)'],
+        line_vals=['triton', 'triton_bit'],
+        line_names=['Triton', 'Triton Bit'],
         ylabel='ms',
         plot_name='gol',
         args={}
@@ -317,11 +465,14 @@ def benchmark(provider, N):
     elif provider == 'compiled_torch':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_conv2d_compiled(x), quantiles=quantiles, rep=500)
     elif provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_1d(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_1d(x, BLOCK_SIZE=1024), quantiles=quantiles, rep=500)
     elif provider == 'cuda':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x, BLOCK_SIZE_ROW=1, BLOCK_SIZE_COL=1024), quantiles=quantiles, rep=500)
     elif provider == 'cuda2':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_shared_memory(x), quantiles=quantiles, rep=500)
+    elif provider == 'triton_bit':
+        x = bit_encode(x)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_bit_1d(x, BLOCK_SIZE=1024 / 8), quantiles=quantiles, rep=500)
     else:
         raise ValueError(f"Invalid provider: {provider}")
     return ms, min_ms, max_ms
