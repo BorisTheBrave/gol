@@ -10,28 +10,31 @@ device = torch.device('cuda:0')
 
 # %%
 
+# Use torch's built in convolution
+# We have to convert to float16 because the convolution doesn't support int8
+
 WEIGHT_F16 = torch.tensor([[1, 1, 1], [1, 0, 1], [1, 1, 1]])[None, None, :, :].to(torch.float16).to(device)
 
-def step1(x: torch.Tensor):
+def gol_torch_conv2d(x: torch.Tensor):
     y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), WEIGHT_F16, padding=1)[0].to(torch.int8)
     return torch.where(x > 0, (y == 2) | (y == 3), (y == 3)).to(torch.int8)
 
 @torch.compile
-def step2(x: torch.Tensor):
-    return step1(x)
+def gol_torch_conv2d_compiled(x: torch.Tensor):
+    return gol_torch_conv2d(x)
 
 # %%
-def step1_f16(x: torch.Tensor):
-    # conv2d doesn'ts eem to support int8
+def gol_torch_conv2d_f16(x: torch.Tensor):
     y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), WEIGHT_F16, padding=1)[0]
     return torch.where(x > 0, (y == 2) | (y == 3), (y == 3)).to(torch.float16)
 
 @torch.compile
-def step2_f16(x: torch.Tensor):
-    return step1_f16(x)
+def gol_torch_conv2d_f16_compiled(x: torch.Tensor):
+    return gol_torch_conv2d_f16(x)
 
 # %%
-def step1_sum(x: torch.Tensor):
+# Sum neighbors via slicing
+def gol_torch_sum(x: torch.Tensor):
     y = torch.zeros_like(x)
     p = [
         (slice(1, None), slice(None, -1)),
@@ -45,13 +48,15 @@ def step1_sum(x: torch.Tensor):
     return torch.where(x == 1, (y == 2) | (y == 3), (y == 3)).to(torch.int8)    
 
 @torch.compile
-def step2_sum(x: torch.Tensor):
-    return step1_sum(x)
+def gol_torch_sum_compiled(x: torch.Tensor):
+    return gol_torch_sum(x)
 
 # %%
 
+# Doesn't work: Triton doesn't support slicing yet
+
 @triton.jit
-def step3_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
+def gol_triton_1d_slice_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
     row_id = tl.program_id(0)
     col_id = tl.program_id(1)
 
@@ -74,7 +79,7 @@ def step3_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constex
 
     tl.store(out_ptr + row_id * row_stride + offsets, result, mask=mask, other=0)
 
-def step3(x: torch.Tensor):
+def gol_triton_1d_slice(x: torch.Tensor):
     BLOCK_SIZE = 256
 
     output = torch.empty_like(x)
@@ -83,12 +88,14 @@ def step3(x: torch.Tensor):
         bs = meta['BLOCK_SIZE']
         return (x.shape[0], triton.cdiv(x.shape[1], bs - 2))
     
-    step3_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE)
+    gol_triton_1d_slice_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE)
 
     return output
 
+# %%
+
 @triton.jit
-def step4_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
+def gol_triton_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
     row_id = tl.program_id(0)
     col_id = tl.program_id(1)
 
@@ -133,7 +140,7 @@ def step4_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constex
 
     tl.store(out_ptr + row_id * row_stride + out_offsets, result, mask=out_mask)
 
-def step4(x: torch.Tensor, BLOCK_SIZE: int = None):
+def gol_triton_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
     # I don't understand block size tuning yet.
     # There seems to be a significant performance difference between 4096 and 8192.
     BLOCK_SIZE = BLOCK_SIZE or 1024
@@ -144,14 +151,13 @@ def step4(x: torch.Tensor, BLOCK_SIZE: int = None):
         bs = meta['BLOCK_SIZE']
         return (x.shape[0], triton.cdiv(x.shape[1], bs))
     
-    step4_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE)
+    gol_triton_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE)
 
     return output
 
 # %%
 import torch
 from torch.utils.cpp_extension import load_inline
-
 
 ext = load_inline(
     name="gol_ext",
@@ -162,7 +168,7 @@ ext = load_inline(
     verbose=True,
 )
 
-def step5(x: torch.Tensor):
+def gol_cuda(x: torch.Tensor):
     output = torch.empty_like(x)
     ext.gol(x, output)
     return output
@@ -180,7 +186,7 @@ ext2 = load_inline(
     verbose=True,
 )
 
-def step6(x: torch.Tensor):
+def gol_cuda_shared_memory(x: torch.Tensor):
     output = torch.empty_like(x)
     ext2.gol(x, output)
     return output
@@ -225,7 +231,7 @@ def visualize_heatmap(x: torch.Tensor, title: str = "Heatmap"):
 
 x = torch.tensor([[0, 0, 0, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 0, 0, 0]]).to(torch.int8).to(device)
 visualize_heatmap(x)
-x = step6(x)
+x = gol_cuda_shared_memory(x)
 visualize_heatmap(x)
 
 # %%
@@ -248,15 +254,15 @@ def benchmark(provider, N):
     x = (torch.rand(x_shape, device=device) < 0.5).to(torch.int8).to(device)
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'torch':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step1(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_conv2d(x), quantiles=quantiles, rep=500)
     elif provider == 'compiled_torch':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step2(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_conv2d_compiled(x), quantiles=quantiles, rep=500)
     elif provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step4(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_1d(x), quantiles=quantiles, rep=500)
     elif provider == 'cuda':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step5(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x), quantiles=quantiles, rep=500)
     elif provider == 'cuda2':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step6(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_shared_memory(x), quantiles=quantiles, rep=500)
     else:
         raise ValueError(f"Invalid provider: {provider}")
     return ms, min_ms, max_ms
@@ -283,21 +289,21 @@ def benchmark(provider, N):
     x = (torch.rand(x_shape, device=device) < 0.5).to(torch.int8).to(device)
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'torch':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step1(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_conv2d(x), quantiles=quantiles, rep=500)
     elif provider == 'compiled_torch':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step2(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_conv2d_compiled(x), quantiles=quantiles, rep=500)
     elif provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step4(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_1d(x), quantiles=quantiles, rep=500)
     elif provider == 'torch_f16':
         x = x.to(torch.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step1_f16(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_conv2d_f16(x), quantiles=quantiles, rep=500)
     elif provider == 'compiled_torch_f16':
         x = x.to(torch.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step2_f16(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_conv2d_f16_compiled(x), quantiles=quantiles, rep=500)
     elif provider == 'torch_sum':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step1_sum(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_sum(x), quantiles=quantiles, rep=500)
     elif provider == 'compiled_torch_sum':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: step2_sum(x), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_sum_compiled(x), quantiles=quantiles, rep=500)
     else:
         raise ValueError(f"Invalid provider: {provider}")
     return ms, min_ms, max_ms
@@ -325,7 +331,7 @@ def benchmark(provider, N):
     x_shape = (N, N)
     x = (torch.rand(x_shape, device=device) < 0.5).to(torch.int8).to(device)
     quantiles = [0.5, 0.2, 0.8]
-    ms, min_ms, max_ms = triton.testing.do_bench(lambda: step4(x, BLOCK_SIZE=provider), quantiles=quantiles, rep=500)
+    ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_1d(x, BLOCK_SIZE=provider), quantiles=quantiles, rep=500)
     return ms, min_ms, max_ms
 
 benchmark.run(print_data=True, show_plots=True)
