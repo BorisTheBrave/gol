@@ -42,7 +42,7 @@ __global__ void gol_kernel_i8(const int8_t* __restrict__ x_ptr, int8_t* __restri
   out_ptr[y * rowstride + x] = result;
 }
 
-void gol(torch::Tensor x, torch::Tensor out) {
+void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_col) {
   TORCH_CHECK(x.is_cuda(), "x must be CUDA tensors");
   TORCH_CHECK(x.scalar_type() == at::kChar, "only int8");
   TORCH_CHECK(x.stride(1) == 1, "colstride must be 1");
@@ -56,12 +56,12 @@ void gol(torch::Tensor x, torch::Tensor out) {
   TORCH_CHECK(out.size(1) == x.size(1), "out must have the same width");
 
   const long n = x.size(0);
-  const int block_size = 16;
-  const int blocks  = (n + block_size - 1) / block_size;
+  const int row_blocks  = (n + block_size_row - 1) / block_size_row;
+  const int col_blocks  = (n + block_size_col - 1) / block_size_col;
   auto stream = at::cuda::getCurrentCUDAStream();
 
-  dim3 grid(blocks, blocks);
-  dim3 block(block_size, block_size);
+  dim3 grid(col_blocks, row_blocks);
+  dim3 block(block_size_col, block_size_row);
 
   gol_kernel_i8<<<grid, block, 0, stream>>>(
       x.data_ptr<int8_t>(), out.data_ptr<int8_t>(), x.stride(0), n);

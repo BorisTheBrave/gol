@@ -156,6 +156,62 @@ def gol_triton_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
     return output
 
 # %%
+
+@triton.jit
+def gol_triton_2d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE_ROW: tl.constexpr, BLOCK_SIZE_COL: tl.constexpr):
+    row_id = tl.program_id(0)
+    col_id = tl.program_id(1)
+
+
+    col_offsets0 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL) - 1)[None, :]
+    col_offsets1 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL))[None, :]
+    col_offsets2 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL) + 1)[None, :]
+
+    row_offsets0 = (row_id * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW) - 1)[:, None]
+    row_offsets1 = (row_id * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW))[:, None]
+    row_offsets2 = (row_id * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW) + 1)[:, None]
+
+    col_mask0 = (col_offsets0 >= 0) & (col_offsets0 < N)
+    col_mask1 = (col_offsets1 >= 0) & (col_offsets1 < N)
+    col_mask2 = (col_offsets2 >= 0) & (col_offsets2 < N)
+
+    row_mask0 = (row_offsets0 >= 0) & (row_offsets0 < N)
+    row_mask1 = (row_offsets1 >= 0) & (row_offsets1 < N)
+    row_mask2 = (row_offsets2 >= 0) & (row_offsets2 < N)
+
+    row00 = tl.load(x_ptr + row_offsets0 * row_stride + col_offsets0, mask=row_mask0 & col_mask0, other=0)
+    row01 = tl.load(x_ptr + row_offsets0 * row_stride + col_offsets1, mask=row_mask0 & col_mask1, other=0)
+    row02 = tl.load(x_ptr + row_offsets0 * row_stride + col_offsets2, mask=row_mask0 & col_mask2, other=0)
+    row10 = tl.load(x_ptr + row_offsets1 * row_stride + col_offsets0, mask=row_mask1 & col_mask0, other=0)
+    row11 = tl.load(x_ptr + row_offsets1 * row_stride + col_offsets1, mask=row_mask1 & col_mask1, other=0)
+    row12 = tl.load(x_ptr + row_offsets1 * row_stride + col_offsets2, mask=row_mask1 & col_mask2, other=0)
+    row20 = tl.load(x_ptr + row_offsets2 * row_stride + col_offsets0, mask=row_mask2 & col_mask0, other=0)
+    row21 = tl.load(x_ptr + row_offsets2 * row_stride + col_offsets1, mask=row_mask2 & col_mask1, other=0)
+    row22 = tl.load(x_ptr + row_offsets2 * row_stride + col_offsets2, mask=row_mask2 & col_mask2, other=0)
+
+    sum = row00 + row01 + row02 + row10 +  row12 + row20 + row21 + row22
+
+    result = tl.where(row11 > 0, (sum == 2) | (sum == 3), sum == 3).to(tl.int8)
+
+    tl.store(out_ptr + row_offsets1 * row_stride + col_offsets1, result, mask=row_mask1 & col_mask1)
+
+def gol_triton_2d(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+    if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
+        BLOCK_SIZE_ROW = 4
+        BLOCK_SIZE_COL = 256
+
+    output = torch.empty_like(x)
+
+    grid = (
+        triton.cdiv(x.shape[0], BLOCK_SIZE_ROW),
+        triton.cdiv(x.shape[1], BLOCK_SIZE_COL),
+    )
+
+    gol_triton_2d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE_ROW=BLOCK_SIZE_ROW, BLOCK_SIZE_COL=BLOCK_SIZE_COL)
+
+    return output
+
+# %%
 import torch
 from torch.utils.cpp_extension import load_inline
 
@@ -168,9 +224,12 @@ ext = load_inline(
     verbose=True,
 )
 
-def gol_cuda(x: torch.Tensor):
+def gol_cuda(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+    if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
+        BLOCK_SIZE_ROW = 4
+        BLOCK_SIZE_COL = 64
     output = torch.empty_like(x)
-    ext.gol(x, output)
+    ext.gol(x, output, BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
     return output
 # %%
 import torch
@@ -312,7 +371,7 @@ benchmark.run(print_data=True, show_plots=True)
 
 # %%
 
-# Test block sizes
+# Test 1d block sizes
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
@@ -335,6 +394,96 @@ def benchmark(provider, N):
     return ms, min_ms, max_ms
 
 benchmark.run(print_data=True, show_plots=True)
+
+# %%
+# Test 2d block sizes
+
+block_sizes = [
+    (1 * (2**i), 1 * (2**j)) for i in range(0, 9) for j in range(0 , 12)
+    if i + j < 11
+]
+def block_str(size):
+    return str(size[0]) + "x" + str(size[1])
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['N'],
+        x_vals=[512 * i for i in range(2, 16, 2)],
+        line_arg='block_sizes',
+        line_vals=block_sizes,
+        line_names=[block_str(size) for size in block_sizes],
+        # styles=[('blue', '-'), ('green', '-'), ('orange', '-')],
+        ylabel='ms',
+        plot_name='gol',
+        args={}
+    ))
+def benchmark(block_sizes, N):
+    # create data
+    x_shape = (N, N)
+    x = (torch.rand(x_shape, device=device) < 0.5).to(torch.int8).to(device)
+    quantiles = [0.5, 0.2, 0.8]
+    # ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_2d(x, BLOCK_SIZE_ROW=block_sizes[0], BLOCK_SIZE_COL=block_sizes[1]), quantiles=quantiles, rep=500)
+    print(block_sizes)
+    ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x, BLOCK_SIZE_ROW=block_sizes[0], BLOCK_SIZE_COL=block_sizes[1]), quantiles=quantiles, rep=500)
+    return ms, min_ms, max_ms
+
+result = benchmark.run(return_df=True)
+
+result
+
+# %%
+
+row_sizes = set([size[0] for size in block_sizes])
+col_sizes = set([size[1] for size in block_sizes])
+
+data={}
+
+for row_size in row_sizes:
+    for col_size in col_sizes:
+        s = block_str((row_size, col_size))
+        if s in result:
+            data[(row_size, col_size)] = result[s][6].item()
+
+import numpy as np
+
+# Sort the unique row and column sizes for consistent plotting order
+sorted_row_sizes = sorted(list(row_sizes))
+sorted_col_sizes = sorted(list(col_sizes))
+
+# Create a 2D array to store the heatmap data
+heatmap_matrix = np.zeros((len(sorted_row_sizes), len(sorted_col_sizes)))
+
+# Populate the heatmap matrix with median execution times
+for i, r_size in enumerate(sorted_row_sizes):
+    for j, c_size in enumerate(sorted_col_sizes):
+        # The 'data' dictionary is already populated with the median 'ms' values
+        heatmap_matrix[i, j] = data.get((r_size, c_size), float('nan'))
+
+# Plot the heatmap
+plt.figure(figsize=(8, 6))
+# Use 'viridis' colormap, 'lower' origin to have (0,0) at bottom-left, and 'auto' aspect ratio
+plt.imshow(heatmap_matrix, cmap='viridis', origin='lower', aspect='auto')
+
+# Set ticks and labels for the axes
+plt.xticks(np.arange(len(sorted_col_sizes)), sorted_col_sizes)
+plt.yticks(np.arange(len(sorted_row_sizes)), sorted_row_sizes)
+
+plt.xlabel("BLOCK_SIZE_COL")
+plt.ylabel("BLOCK_SIZE_ROW")
+plt.title("Median Execution Time (ms) for gol_cuda Block Sizes")
+
+# Add a colorbar to indicate the scale of execution times
+cbar = plt.colorbar()
+cbar.set_label("Median Time (ms)")
+
+# Add text annotations for the values in each cell
+for i in range(len(sorted_row_sizes)):
+    for j in range(len(sorted_col_sizes)):
+        plt.text(j, i, f"{heatmap_matrix[i, j]:.2f}",
+                 ha="center", va="center", color="w", fontsize=9) # White text for better contrast on viridis
+
+plt.tight_layout() # Adjust plot to ensure everything fits without overlapping
+plt.show()
+
 
 
 # %%
