@@ -212,7 +212,20 @@ def gol_triton_2d(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: i
     return output
 
 # %%
-if __name__ == "__main__":
+def is_notebook() -> bool:
+    try:
+        from IPython import get_ipython
+        shell = get_ipython().__class__.__name__
+        if shell == 'ZMQInteractiveShell':
+            return True   # Jupyter notebook or qtconsole
+        elif shell == 'TerminalInteractiveShell':
+            return False  # Terminal running IPython
+        else:
+            return False  # Other type (?)
+    except NameError:
+        return False      # Probably standard Python interpreter
+
+if not is_notebook():
     x = torch.randint(0, 2, (8096, 8096), device=device, dtype=torch.int8)
     for i in range(500):
         output = gol_triton_1d(x)
@@ -224,16 +237,20 @@ if __name__ == "__main__":
 import torch
 from torch.utils.cpp_extension import load_inline
 
-ext = load_inline(
-    name="gol_ext",
-    cpp_sources="",            # no separate C++ binding file
-    cuda_sources=[open("kernel.cpp").read()],   # contains both kernel and PYBIND11 module
-    with_cuda=True,
-    extra_cuda_cflags=["-O3"],
-    verbose=True,
-)
+ext = None
+def init_ext():
+    global ext
+    ext = load_inline(
+        name="gol_ext",
+        cpp_sources="",            # no separate C++ binding file
+        cuda_sources=[open("kernel.cpp").read()],   # contains both kernel and PYBIND11 module
+        with_cuda=True,
+        extra_cuda_cflags=["-O3"],
+        verbose=True,
+    )
 
 def gol_cuda(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+    if ext is None: init_ext()
     if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
         BLOCK_SIZE_ROW = 4
         BLOCK_SIZE_COL = 64
@@ -244,17 +261,21 @@ def gol_cuda(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = 
 import torch
 from torch.utils.cpp_extension import load_inline
 
+ext2 = None
 
-ext2 = load_inline(
-    name="gol2_ext",
-    cpp_sources="",            # no separate C++ binding file
-    cuda_sources=[open("kernel2.cpp").read()],   # contains both kernel and PYBIND11 module
-    with_cuda=True,
-    extra_cuda_cflags=["-O3"],
-    verbose=True,
-)
+def init_ext2():
+    global ext2
+    ext2 = load_inline(
+        name="gol2_ext",
+        cpp_sources="",            # no separate C++ binding file
+        cuda_sources=[open("kernel2.cpp").read()],   # contains both kernel and PYBIND11 module
+        with_cuda=True,
+        extra_cuda_cflags=["-O3"],
+        verbose=True,
+    )
 
 def gol_cuda_shared_memory(x: torch.Tensor):
+    if ext2 is None: init_ext2()
     output = torch.empty_like(x)
     ext2.gol(x, output)
     return output
@@ -265,7 +286,7 @@ def gol_cuda_shared_memory(x: torch.Tensor):
 # %%
 
 @triton.jit
-def gol_triton_bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
+def gol_triton_8bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
     row_id = tl.program_id(0)
     col_id = tl.program_id(1)
 
@@ -359,7 +380,7 @@ def gol_triton_bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE
 
     tl.store(out_ptr + row_id * row_stride + out_offsets, result, mask=out_mask)
 
-def gol_triton_bit_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
+def gol_triton_8bit_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
     # I don't understand block size tuning yet.
     # There seems to be a significant performance difference between 4096 and 8192.
     BLOCK_SIZE = BLOCK_SIZE or 1024
@@ -370,7 +391,7 @@ def gol_triton_bit_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
         bs = meta['BLOCK_SIZE']
         return (x.shape[0], triton.cdiv(x.shape[1], bs))
     
-    gol_triton_bit_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE, num_warps=4)
+    gol_triton_8bit_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE, num_warps=4)
 
     return output
 
@@ -394,6 +415,221 @@ def bit_decode(x: torch.Tensor):
     out[:, 6::8] = (x >> 6) & 1
     out[:, 7::8] = (x >> 7) & 1
     return out
+
+# %%
+
+@triton.jit
+def gol_triton_32bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
+    row_id = tl.program_id(0)
+    col_id = tl.program_id(1)
+
+    offsets0 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) - 1
+    offsets1 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    offsets2 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) + 1
+
+    mask0 = (offsets0 >= 0) & (offsets0 < ((N + 31) // 32))
+    mask1 = (offsets1 >= 0) & (offsets1 < ((N + 31) // 32))
+    mask2 = (offsets2 >= 0) & (offsets2 < ((N + 31) // 32))
+
+    row_ptr = x_ptr + row_id * row_stride
+
+    if row_id > 0:
+        row00 = tl.load(row_ptr + offsets0 - row_stride, mask=mask0, other=0)
+        row01 = tl.load(row_ptr + offsets1 - row_stride, mask=mask1, other=0)
+        row02 = tl.load(row_ptr + offsets2 - row_stride, mask=mask2, other=0)
+    else:
+        row00 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint32)
+        row01 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint32)
+        row02 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint32)
+    row10 = tl.load(row_ptr + offsets0, mask=mask0, other=0)
+    row11 = tl.load(row_ptr + offsets1, mask=mask1, other=0)
+    row12 = tl.load(row_ptr + offsets2, mask=mask2, other=0)
+    if row_id < N - 1:
+        row20 = tl.load(row_ptr + offsets0 + row_stride, mask=mask0, other=0)
+        row21 = tl.load(row_ptr + offsets1 + row_stride, mask=mask1, other=0)
+        row22 = tl.load(row_ptr + offsets2 + row_stride, mask=mask2, other=0)
+    else:
+        row20 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint32)
+        row21 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint32)
+        row22 = tl.zeros((BLOCK_SIZE,), dtype=tl.uint32)
+
+    # Isolate the bits by sixes, and sum across rows
+    # # (note bits 30, 31 are excluded as we'd run into overflow issues)
+    a0 = ((row01 & 0o0101010101) + (row11 & 0o0101010101) + (row21 & 0o0101010101))
+    a1 = ((row01 & 0o0202020202) + (row11 & 0o0202020202) + (row21 & 0o0202020202)) >> 1
+    a2 = ((row01 & 0o0404040404) + (row11 & 0o0404040404) + (row21 & 0o0404040404)) >> 2
+    a3 = ((row01 & 0o1010101010) + (row11 & 0o1010101010) + (row21 & 0o1010101010)) >> 3
+    a4 = ((row01 & 0o2020202020) + (row11 & 0o2020202020) + (row21 & 0o2020202020)) >> 4
+    a5 = ((row01 & 0o4040404040) + (row11 & 0o4040404040) + (row21 & 0o4040404040)) >> 5
+
+    # Compute triple sums
+    b0 = a0 + a1 + a2
+    b1 = a1 + a2 + a3
+    b2 = a2 + a3 + a4
+    b3 = a3 + a4 + a5
+    b4 = a4 + a5 + (a0 >> 6)
+    b5 = a5 + (a0 >> 6) + (a1 >> 6)
+
+
+    # Now read out all the sums
+    sum_1 = (a0 + a1) & 0o77 # [0, 1]
+    sum0 = (b0 >> 0) & 0o77 # [0, 1, 2]
+    sum1 = (b1 >> 0) & 0o77
+    sum2 = (b2 >> 0) & 0o77
+    sum3 = (b3 >> 0) & 0o77
+    sum4 = (b4 >> 0) & 0o77
+    sum5 = (b5 >> 0) & 0o77
+    sum6 = (b0 >> 6) & 0o77
+    sum7 = (b1 >> 6) & 0o77
+    sum8 = (b2 >> 6) & 0o77
+    sum9 = (b3 >> 6) & 0o77
+    sum10 = (b4 >> 6) & 0o77
+    sum11 = (b5 >> 6) & 0o77
+    sum12 = (b0 >> 12) & 0o77
+    sum13 = (b1 >> 12) & 0o77
+    sum14 = (b2 >> 12) & 0o77
+    sum15 = (b3 >> 12) & 0o77
+    sum16 = (b4 >> 12) & 0o77
+    sum17 = (b5 >> 12) & 0o77
+    sum18 = (b0 >> 18) & 0o77
+    sum19 = (b1 >> 18) & 0o77
+    sum20 = (b2 >> 18) & 0o77
+    sum21 = (b3 >> 18) & 0o77
+    sum22 = (b4 >> 18) & 0o77
+    sum23 = (b5 >> 18) & 0o77
+    sum24 = (b0 >> 24) & 0o77
+    sum25 = (b1 >> 24) & 0o77
+    sum26 = (b2 >> 24) & 0o77
+    sum27 = (b3 >> 24) & 0o77 # [27, 28, 29]
+    sum28 = (b4 >> 24) & 0o77 # [28, 29]
+    sum29 = (b5 >> 24) & 0o77 # [29]
+    sum30 = 0 # []
+
+    # Now add in the bits that are missing
+    bit_1 = (row00 >> 31) + (row10 >> 31) + (row20 >> 31)
+    bit30 = ((row01 >> 30) & 1) + ((row11 >> 30) & 1) + ((row21 >> 30) & 1)
+    bit31 = ((row01 >> 31) & 1) + ((row11 >> 31) & 1) + ((row21 >> 31) & 1)
+    bit32 = (row02 & 1) + (row12 & 1) + (row22 & 1)
+
+    sum_1 += bit_1
+    sum28 += bit30
+    sum29 += bit30 + bit31
+    sum30 += bit30 + bit31 + bit32
+
+    # Get the actual aliveness
+    alive0 = (row11 >> 0) & 1
+    alive1 = (row11 >> 1) & 1
+    alive2 = (row11 >> 2) & 1
+    alive3 = (row11 >> 3) & 1
+    alive4 = (row11 >> 4) & 1
+    alive5 = (row11 >> 5) & 1
+    alive6 = (row11 >> 6) & 1
+    alive7 = (row11 >> 7) & 1
+    alive8 = (row11 >> 8) & 1
+    alive9 = (row11 >> 9) & 1
+    alive10 = (row11 >> 10) & 1
+    alive11 = (row11 >> 11) & 1
+    alive12 = (row11 >> 12) & 1
+    alive13 = (row11 >> 13) & 1
+    alive14 = (row11 >> 14) & 1
+    alive15 = (row11 >> 15) & 1
+    alive16 = (row11 >> 16) & 1
+    alive17 = (row11 >> 17) & 1
+    alive18 = (row11 >> 18) & 1
+    alive19 = (row11 >> 19) & 1
+    alive20 = (row11 >> 20) & 1
+    alive21 = (row11 >> 21) & 1
+    alive22 = (row11 >> 22) & 1
+    alive23 = (row11 >> 23) & 1
+    alive24 = (row11 >> 24) & 1
+    alive25 = (row11 >> 25) & 1
+    alive26 = (row11 >> 26) & 1
+    alive27 = (row11 >> 27) & 1
+    alive28 = (row11 >> 28) & 1
+    alive29 = (row11 >> 29) & 1
+    alive30 = (row11 >> 30) & 1
+    alive31 = (row11 >> 31) & 1
+
+    # Finally, do the gol logic
+    # Note our sums include the central cell
+    # So it's alive ? sum == 3 || sum == 4 : sum == 3
+    # i.e. (alive & (sum == 4)) | sum == 3
+
+    alive0 = (alive0 & (sum_1 == 4)) | (sum_1 == 3)
+    alive1 = (alive1 & (sum0 == 4)) | (sum0 == 3)
+    alive2 = (alive2 & (sum1 == 4)) | (sum1 == 3)
+    alive3 = (alive3 & (sum2 == 4)) | (sum2 == 3)
+    alive4 = (alive4 & (sum3 == 4)) | (sum3 == 3)
+    alive5 = (alive5 & (sum4 == 4)) | (sum4 == 3)
+    alive6 = (alive6 & (sum5 == 4)) | (sum5 == 3)
+    alive7 = (alive7 & (sum6 == 4)) | (sum6 == 3)
+    alive8 = (alive8 & (sum7 == 4)) | (sum7 == 3)
+    alive9 = (alive9 & (sum8 == 4)) | (sum8 == 3)
+    alive10 = (alive10 & (sum9 == 4)) | (sum9 == 3)
+    alive11 = (alive11 & (sum10 == 4)) | (sum10 == 3)
+    alive12 = (alive12 & (sum11 == 4)) | (sum11 == 3)
+    alive13 = (alive13 & (sum12 == 4)) | (sum12 == 3)
+    alive14 = (alive14 & (sum13 == 4)) | (sum13 == 3)
+    alive15 = (alive15 & (sum14 == 4)) | (sum14 == 3)
+    alive16 = (alive16 & (sum15 == 4)) | (sum15 == 3)
+    alive17 = (alive17 & (sum16 == 4)) | (sum16 == 3)
+    alive18 = (alive18 & (sum17 == 4)) | (sum17 == 3)
+    alive19 = (alive19 & (sum18 == 4)) | (sum18 == 3)
+    alive20 = (alive20 & (sum19 == 4)) | (sum19 == 3)
+    alive21 = (alive21 & (sum20 == 4)) | (sum20 == 3)
+    alive22 = (alive22 & (sum21 == 4)) | (sum21 == 3)
+    alive23 = (alive23 & (sum22 == 4)) | (sum22 == 3)
+    alive24 = (alive24 & (sum23 == 4)) | (sum23 == 3)
+    alive25 = (alive25 & (sum24 == 4)) | (sum24 == 3)
+    alive26 = (alive26 & (sum25 == 4)) | (sum25 == 3)
+    alive27 = (alive27 & (sum26 == 4)) | (sum26 == 3)
+    alive28 = (alive28 & (sum27 == 4)) | (sum27 == 3)
+    alive29 = (alive29 & (sum28 == 4)) | (sum28 == 3)
+    alive30 = (alive30 & (sum29 == 4)) | (sum29 == 3)
+    alive31 = (alive31 & (sum30 == 4)) | (sum30 == 3)
+
+    # Pack bits
+    result = (
+        (alive0 << 0) | (alive1 << 1) | (alive2 << 2) | (alive3 << 3) | (alive4 << 4) | (alive5 << 5) | (alive6 << 6) | (alive7 << 7) |
+        (alive8 << 8) | (alive9 << 9) | (alive10 << 10) | (alive11 << 11) | (alive12 << 12) | (alive13 << 13) | (alive14 << 14) | (alive15 << 15) | (alive16 << 16) |
+        (alive17 << 17) | (alive18 << 18) | (alive19 << 19) | (alive20 << 20) | (alive21 << 21) | (alive22 << 22) | (alive23 << 23) | (alive24 << 24) |
+        (alive25 << 25) | (alive26 << 26) | (alive27 << 27) | (alive28 << 28) | (alive29 << 29) | (alive30 << 30) | (alive31 << 31)
+    )
+
+    out_offsets = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    out_mask = (out_offsets >= 0) & (out_offsets < ((N + 31) // 32))
+
+    tl.store(out_ptr + row_id * row_stride + out_offsets, result, mask=out_mask)
+
+def gol_triton_32bit_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
+    # I don't understand block size tuning yet.
+    # There seems to be a significant performance difference between 4096 and 8192.
+    BLOCK_SIZE = BLOCK_SIZE or 32
+
+    output = torch.empty_like(x)
+
+    def grid(meta):
+        bs = meta['BLOCK_SIZE']
+        return (x.shape[0], triton.cdiv(x.shape[1], bs))
+    
+    gol_triton_32bit_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE, num_warps=4)
+
+    return output
+
+def long_encode(x: torch.Tensor):
+    assert x.shape[1] % 32 == 0
+    assert x.is_contiguous()
+    x = bit_encode(x)
+    # out = torch.empty(0, dtype=torch.uint32, device=x.device)
+    # out.set_(x.untyped_storage(), x, (x.shape[0] , x.shape[1] // 4))
+    return x.view(torch.uint32)
+
+def long_decode(x: torch.Tensor):
+    assert x.is_contiguous()
+    # out = torch.empty(0, dtype=torch.uint8, device=x.device)
+    # out.set_(x.untyped_storage(), x, (x.shape[0] , x.shape[1] *4))
+    out = x.view(torch.uint8)
+    return bit_decode(out)
 
 # %%
 
@@ -435,10 +671,14 @@ def visualize_heatmap(x: torch.Tensor, title: str = "Heatmap"):
 # %%
 
 x = torch.tensor([[0, 0, 0, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 0, 0, 0]]).to(torch.int8).to(device)
+x = torch.zeros((32, 32)).to(torch.int8).to(device)
+x[2, 1] = 1
+x[2, 2] = 1
+x[2, 3] = 1
 visualize_heatmap(x)
-x = bit_encode(x)
-x = gol_triton_bit_1d(x)
-x = bit_decode(x)
+x = long_encode(x)
+x = gol_triton_32bit_1d(x)
+x = long_decode(x)
 visualize_heatmap(x)
 
 # %%
@@ -447,15 +687,17 @@ visualize_heatmap(x)
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],
-        x_vals=[512 * i for i in range(2, 32, 2)],
+        # x_vals=[512 * i for i in range(2, 32, 2)],
+        x_vals=[2 * 512 * i for i in range(2, 64+1, 2)],
         line_arg='provider',
-        line_vals=['triton', 'triton_bit'],
-        line_names=['Triton', 'Triton Bit'],
+        line_vals=['triton', 'triton_bit', 'triton_long'],
+        line_names=['Triton', 'Triton Bit', 'Triton Long'],
         ylabel='ms',
         plot_name='gol',
         args={}
     ))
 def benchmark(provider, N):
+    print(provider, N)
     # create data
     x_shape = (N, N)
     x = (torch.rand(x_shape, device=device) < 0.5).to(torch.int8).to(device)
@@ -472,7 +714,10 @@ def benchmark(provider, N):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_shared_memory(x), quantiles=quantiles, rep=500)
     elif provider == 'triton_bit':
         x = bit_encode(x)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_bit_1d(x, BLOCK_SIZE=1024 / 8), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_bit_1d(x, BLOCK_SIZE=128), quantiles=quantiles, rep=500)
+    elif provider == 'triton_long':
+        x = long_encode(x)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_long_1d(x, BLOCK_SIZE=256), quantiles=quantiles, rep=500)
     else:
         raise ValueError(f"Invalid provider: {provider}")
     return ms, min_ms, max_ms
