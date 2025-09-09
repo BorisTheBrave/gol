@@ -7,7 +7,7 @@ __global__ void gol_kernel_i8(const int8_t* __restrict__ x_ptr, int8_t* __restri
   long x = blockIdx.x * blockDim.x + threadIdx.x;
   long y = blockIdx.y * blockDim.y + threadIdx.y;
 
-  if (x >= n || y >= n) return;
+  if (x >= n - 2 || y >= n - 2) return;
 
   int8_t r00 = 0;
   int8_t r01 = 0;
@@ -19,27 +19,24 @@ __global__ void gol_kernel_i8(const int8_t* __restrict__ x_ptr, int8_t* __restri
   int8_t r21 = 0;
   int8_t r22 = 0;
 
-  if (y > 0) {
-    if (x > 0) r00 = x_ptr[y * rowstride + x - rowstride - 1];
-    r01 = x_ptr[y * rowstride + x - rowstride];
-    if (x < n - 1) r02 = x_ptr[y * rowstride + x - rowstride + 1];
-  }
-  
-  if (x > 0) r10 = x_ptr[y * rowstride + x - 1];
-  r11 = x_ptr[y * rowstride + x];
-  if (x < n - 1) r12 = x_ptr[y * rowstride + x + 1];
+  r00 = x_ptr[y * rowstride + x + 0 * rowstride + 0];
+  r01 = x_ptr[y * rowstride + x + 0 * rowstride + 1];
+  r02 = x_ptr[y * rowstride + x + 0 * rowstride + 2];
 
-  if (y < n - 1) {
-    if (x > 0) r20 = x_ptr[y * rowstride + x + rowstride - 1];
-    r21 = x_ptr[y * rowstride + x + rowstride];
-    if (x < n - 1) r22 = x_ptr[y * rowstride + x + rowstride + 1];
-  }
+  r10 = x_ptr[y * rowstride + x + 1 * rowstride + 0];
+  r11 = x_ptr[y * rowstride + x + 1 * rowstride + 1];
+  r12 = x_ptr[y * rowstride + x + 1 * rowstride + 2];
+
+  r20 = x_ptr[y * rowstride + x + 2 * rowstride + 0];
+  r21 = x_ptr[y * rowstride + x + 2 * rowstride + 1];
+  r22 = x_ptr[y * rowstride + x + 2 * rowstride + 2];
+
 
   int8_t sum = r00 + r01 + r02 + r10 + r12 + r20 + r21 + r22;
 
   int8_t result = (r11 > 0) ? ((sum == 2) || (sum == 3) ? 1 : 0) : (sum == 3 ? 1 : 0);
 
-  out_ptr[y * rowstride + x] = result;
+  out_ptr[(y + 1) * rowstride + (x + 1)] = result;
 }
 
 void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_col) {
@@ -56,8 +53,8 @@ void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_
   TORCH_CHECK(out.size(1) == x.size(1), "out must have the same width");
 
   const long n = x.size(0);
-  const int row_blocks  = (n + block_size_row - 1) / block_size_row;
-  const int col_blocks  = (n + block_size_col - 1) / block_size_col;
+  const int row_blocks  = (n - 2 + block_size_row - 1) / block_size_row;
+  const int col_blocks  = (n - 2 + block_size_col - 1) / block_size_col;
   auto stream = at::cuda::getCurrentCUDAStream();
 
   dim3 grid(col_blocks, row_blocks);

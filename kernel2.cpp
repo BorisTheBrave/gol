@@ -10,37 +10,40 @@ __global__ void gol_tiled_kernel_i8(const int8_t* __restrict__ x,
                                     int W, int H) {
   const int tx = threadIdx.x;
   const int ty = threadIdx.y;
-  const int gx = blockIdx.x * BLOCK_X + tx; // global x (column)
-  const int gy = blockIdx.y * BLOCK_Y + ty; // global y (row)
+  const int gx = blockIdx.x * BLOCK_X + tx + 1; // global x (column)
+  const int gy = blockIdx.y * BLOCK_Y + ty + 1; // global y (row)
+
+  if (gx <= 0 || gy <= 0 || gx >= W - 2 || gy >= H - 2) return;
+
 
   // +2 for 1-cell halo on each side
   __shared__ unsigned char tile[BLOCK_Y + 2][BLOCK_X + 2];
 
   // central cell
-  tile[ty + 1][tx + 1] = (gx < W && gy < H) ? x[(long long)gy * rowstride + gx] : 0;
+  tile[ty + 1][tx + 1] = x[(long long)gy * rowstride + gx];
 
   // halos: left/right
-  if (tx == 0)       tile[ty + 1][0]            = (gx > 0      && gy < H) ? x[(long long)gy * rowstride + (gx - 1)] : 0;
+  if (tx == 0)       tile[ty + 1][0]            = x[(long long)gy * rowstride + (gx - 1)];
   if (tx == BLOCK_X - 1)
-                     tile[ty + 1][BLOCK_X + 1]  = (gx + 1 < W  && gy < H) ? x[(long long)gy * rowstride + (gx + 1)] : 0;
+                     tile[ty + 1][BLOCK_X + 1]  = x[(long long)gy * rowstride + (gx + 1)];
 
   // halos: top/bottom
-  if (ty == 0)       tile[0][tx + 1]            = (gy > 0      && gx < W) ? x[(long long)(gy - 1) * rowstride + gx] : 0;
+  if (ty == 0)       tile[0][tx + 1]            = x[(long long)(gy - 1) * rowstride + gx];
   if (ty == BLOCK_Y - 1)
-                     tile[BLOCK_Y + 1][tx + 1]  = (gy + 1 < H  && gx < W) ? x[(long long)(gy + 1) * rowstride + gx] : 0;
+                     tile[BLOCK_Y + 1][tx + 1]  = x[(long long)(gy + 1) * rowstride + gx];
 
   // corners
   if (tx == 0 && ty == 0)
-    tile[0][0] = (gx > 0 && gy > 0) ? x[(long long)(gy - 1) * rowstride + (gx - 1)] : 0;
+    tile[0][0] = x[(long long)(gy - 1) * rowstride + (gx - 1)];
 
   if (tx == BLOCK_X - 1 && ty == 0)
-    tile[0][BLOCK_X + 1] = (gx + 1 < W && gy > 0) ? x[(long long)(gy - 1) * rowstride + (gx + 1)] : 0;
+    tile[0][BLOCK_X + 1] = x[(long long)(gy - 1) * rowstride + (gx + 1)];
 
   if (tx == 0 && ty == BLOCK_Y - 1)
-    tile[BLOCK_Y + 1][0] = (gx > 0 && gy + 1 < H) ? x[(long long)(gy + 1) * rowstride + (gx - 1)] : 0;
+    tile[BLOCK_Y + 1][0] = x[(long long)(gy + 1) * rowstride + (gx - 1)];
 
   if (tx == BLOCK_X - 1 && ty == BLOCK_Y - 1)
-    tile[BLOCK_Y + 1][BLOCK_X + 1] = (gx + 1 < W && gy + 1 < H) ? x[(long long)(gy + 1) * rowstride + (gx + 1)] : 0;
+    tile[BLOCK_Y + 1][BLOCK_X + 1] = x[(long long)(gy + 1) * rowstride + (gx + 1)];
 
   __syncthreads();
 
@@ -74,8 +77,8 @@ void gol(torch::Tensor x, torch::Tensor out) {
   const long n = x.size(0);
   const int block_size_row = 4;
   const int block_size_col = 64;
-  const int row_blocks  = (n + block_size_row - 1) / block_size_row;
-  const int col_blocks  = (n + block_size_col - 1) / block_size_col;
+  const int row_blocks  = (n - 2 + block_size_row - 1) / block_size_row;
+  const int col_blocks  = (n - 2 + block_size_col - 1) / block_size_col;
   auto stream = at::cuda::getCurrentCUDAStream();
 
   dim3 grid(col_blocks, row_blocks);

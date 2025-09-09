@@ -16,8 +16,10 @@ device = torch.device('cuda:0')
 WEIGHT_F16 = torch.tensor([[1, 1, 1], [1, 0, 1], [1, 1, 1]])[None, None, :, :].to(torch.float16).to(device)
 
 def gol_torch_conv2d(x: torch.Tensor):
-    y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), WEIGHT_F16, padding=1)[0].to(torch.int8)
-    return torch.where(x > 0, (y == 2) | (y == 3), (y == 3)).to(torch.int8)
+    y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), WEIGHT_F16)[0].to(torch.int8)
+    y = torch.nn.functional.pad(y, (1, 1, 1, 1), value=0)
+    y = torch.where(x > 0, (y == 2) | (y == 3), (y == 3)).to(torch.int8)
+    return y
 
 @torch.compile
 def gol_torch_conv2d_compiled(x: torch.Tensor):
@@ -25,8 +27,10 @@ def gol_torch_conv2d_compiled(x: torch.Tensor):
 
 # %%
 def gol_torch_conv2d_f16(x: torch.Tensor):
-    y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), WEIGHT_F16, padding=1)[0]
-    return torch.where(x > 0, (y == 2) | (y == 3), (y == 3)).to(torch.float16)
+    y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), WEIGHT_F16)[0]
+    y = torch.nn.functional.pad(y, (1, 1, 1, 1), value=0)
+    y = torch.where(x > 0, (y == 2) | (y == 3), (y == 3)).to(torch.float16)
+    return y
 
 @torch.compile
 def gol_torch_conv2d_f16_compiled(x: torch.Tensor):
@@ -37,13 +41,13 @@ def gol_torch_conv2d_f16_compiled(x: torch.Tensor):
 def gol_torch_sum(x: torch.Tensor):
     y = torch.zeros_like(x)
     p = [
-        (slice(1, None), slice(None, -1)),
-        (slice(None, None), slice(None, None)),
-        (slice(None, -1), slice(1, None)),
+        slice(0, -2),
+        slice(1, -1),
+        slice(2, None),
     ]
-    for a, b in p:
-        for c, d in p:
-            y[a, c] += x[b, d]
+    for s1 in p:
+        for s2 in p:
+            y[1:-1, 1:-1] += x[s1, s2]
 
     return torch.where(x == 1, (y == 2) | (y == 3), (y == 3)).to(torch.int8)    
 
@@ -53,57 +57,14 @@ def gol_torch_sum_compiled(x: torch.Tensor):
 
 # %%
 
-# Doesn't work: Triton doesn't support slicing yet
-
-@triton.jit
-def gol_triton_1d_slice_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
-    row_id = tl.program_id(0)
-    col_id = tl.program_id(1)
-
-    offsets = col_id * (BLOCK_SIZE - 2) - 1 + tl.arange(0, BLOCK_SIZE)
-
-    indexes = x_ptr + row_id * row_stride + offsets
-    mask = (offsets < N) & (offsets >= 0)
-
-
-    row0 = tl.load(indexes - row_stride, mask=mask, other=0) if row_id > 0 else tl.zeros((BLOCK_SIZE,), dtype=tl.int8)
-    row1 = tl.load(indexes, mask=mask, other=0)
-    row2 = tl.load(indexes + row_stride, mask=mask, other=0) if row_id < N - 1 else tl.zeros((BLOCK_SIZE,), dtype=tl.int8)
-
-    sum = row0 + row1 + row2
-    # Oops: Triton doesn't support slicing yet
-    sum2 = sum[:-2] + sum[1:-1] + sum[2:]
-    current = row1[1:-1]
-
-    result = tl.where(current > 0, (sum2 == 2) | (sum2 == 3), sum2 == 3).to(tl.int8)
-
-    tl.store(out_ptr + row_id * row_stride + offsets, result, mask=mask, other=0)
-
-def gol_triton_1d_slice(x: torch.Tensor):
-    BLOCK_SIZE = 256
-
-    output = torch.empty_like(x)
-
-    def grid(meta):
-        bs = meta['BLOCK_SIZE']
-        return (x.shape[0], triton.cdiv(x.shape[1], bs - 2))
-    
-    gol_triton_1d_slice_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE)
-
-    return output
-
-# %%
-
 @triton.jit
 def gol_triton_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
     row_id = tl.program_id(0)
     col_id = tl.program_id(1)
 
-
-
-    offsets0 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) - 1
-    offsets1 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    offsets2 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) + 1
+    offsets0 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    offsets1 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) + 1
+    offsets2 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) + 2
 
     mask0 = (offsets0 >= 0) & (offsets0 < N)
     mask1 = (offsets1 >= 0) & (offsets1 < N)
@@ -111,34 +72,24 @@ def gol_triton_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl
 
     row_ptr = x_ptr + row_id * row_stride
 
-    if row_id > 0:
-        row00 = tl.load(row_ptr + offsets0 - row_stride, mask=mask0, other=0)
-        row01 = tl.load(row_ptr + offsets1 - row_stride, mask=mask1, other=0)
-        row02 = tl.load(row_ptr + offsets2 - row_stride, mask=mask2, other=0)
-    else:
-        row00 = tl.zeros((BLOCK_SIZE,), dtype=tl.int8)
-        row01 = tl.zeros((BLOCK_SIZE,), dtype=tl.int8)
-        row02 = tl.zeros((BLOCK_SIZE,), dtype=tl.int8)
-    row10 = tl.load(row_ptr + offsets0, mask=mask0, other=0)
-    row11 = tl.load(row_ptr + offsets1, mask=mask1, other=0)
-    row12 = tl.load(row_ptr + offsets2, mask=mask2, other=0)
-    if row_id < N - 1:
-        row20 = tl.load(row_ptr + offsets0 + row_stride, mask=mask0, other=0)
-        row21 = tl.load(row_ptr + offsets1 + row_stride, mask=mask1, other=0)
-        row22 = tl.load(row_ptr + offsets2 + row_stride, mask=mask2, other=0)
-    else:
-        row20 = tl.zeros((BLOCK_SIZE,), dtype=tl.int8)
-        row21 = tl.zeros((BLOCK_SIZE,), dtype=tl.int8)
-        row22 = tl.zeros((BLOCK_SIZE,), dtype=tl.int8)
+    row00 = tl.load(row_ptr + offsets0 + 0 * row_stride, mask=mask0, other=0)
+    row01 = tl.load(row_ptr + offsets1 + 0 * row_stride, mask=mask1, other=0)
+    row02 = tl.load(row_ptr + offsets2 + 0 * row_stride, mask=mask2, other=0)
+    row10 = tl.load(row_ptr + offsets0 + 1 * row_stride, mask=mask0, other=0)
+    row11 = tl.load(row_ptr + offsets1 + 1 * row_stride, mask=mask1, other=0)
+    row12 = tl.load(row_ptr + offsets2 + 1 * row_stride, mask=mask2, other=0)
+    row20 = tl.load(row_ptr + offsets0 + 2 * row_stride, mask=mask0, other=0)
+    row21 = tl.load(row_ptr + offsets1 + 2 * row_stride, mask=mask1, other=0)
+    row22 = tl.load(row_ptr + offsets2 + 2 * row_stride, mask=mask2, other=0)
 
     sum = row00 + row01 + row02 + row10 +  row12 + row20 + row21 + row22
 
     result = tl.where(row11 > 0, (sum == 2) | (sum == 3), sum == 3).to(tl.int8)
 
-    out_offsets = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    out_mask = (out_offsets >= 0) & (out_offsets < N)
+    out_offsets = offsets1
+    out_mask = (out_offsets >= 1) & (out_offsets < N - 1)
 
-    tl.store(out_ptr + row_id * row_stride + out_offsets, result, mask=out_mask)
+    tl.store(out_ptr + (row_id + 1) * row_stride + out_offsets, result, mask=out_mask)
 
 def gol_triton_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
     # I don't understand block size tuning yet.
@@ -149,7 +100,7 @@ def gol_triton_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
 
     def grid(meta):
         bs = meta['BLOCK_SIZE']
-        return (x.shape[0], triton.cdiv(x.shape[1], bs))
+        return (x.shape[0] - 2, triton.cdiv(x.shape[1] - 2, bs))
     
     gol_triton_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE, num_warps=4)
 
@@ -163,13 +114,13 @@ def gol_triton_2d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE_ROW
     col_id = tl.program_id(1)
 
 
-    col_offsets0 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL) - 1)[None, :]
-    col_offsets1 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL))[None, :]
-    col_offsets2 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL) + 1)[None, :]
+    col_offsets0 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL) + 0)[None, :]
+    col_offsets1 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL) + 1)[None, :]
+    col_offsets2 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL) + 2)[None, :]
 
-    row_offsets0 = (row_id * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW) - 1)[:, None]
-    row_offsets1 = (row_id * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW))[:, None]
-    row_offsets2 = (row_id * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW) + 1)[:, None]
+    row_offsets0 = (row_id * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW) + 0)[:, None]
+    row_offsets1 = (row_id * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW) + 1)[:, None]
+    row_offsets2 = (row_id * BLOCK_SIZE_ROW + tl.arange(0, BLOCK_SIZE_ROW) + 2)[:, None]
 
     col_mask0 = (col_offsets0 >= 0) & (col_offsets0 < N)
     col_mask1 = (col_offsets1 >= 0) & (col_offsets1 < N)
@@ -203,8 +154,8 @@ def gol_triton_2d(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: i
     output = torch.empty_like(x)
 
     grid = (
-        triton.cdiv(x.shape[0], BLOCK_SIZE_ROW),
-        triton.cdiv(x.shape[1], BLOCK_SIZE_COL),
+        triton.cdiv(x.shape[0] - 2, BLOCK_SIZE_ROW),
+        triton.cdiv(x.shape[1] - 2, BLOCK_SIZE_COL),
     )
 
     gol_triton_2d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE_ROW=BLOCK_SIZE_ROW, BLOCK_SIZE_COL=BLOCK_SIZE_COL, num_stages=1)
@@ -984,24 +935,50 @@ x = torch.zeros((64, 64)).to(torch.int8).to(device)
 x[2, 1] = 1
 x[2, 2] = 1
 x[2, 3] = 1
-visualize_heatmap(x[:6, : 6])
-x = longlong_encode(x)
-x = gol_triton_64bit_1d(x)
-x = longlong_decode(x)
+# visualize_heatmap(x[:6, : 6])
+
+# x = gol_torch_conv2d_compiled(x)
+# visualize_heatmap(x[:6, : 6])
+
+# x = gol_triton_1d(x)
+# visualize_heatmap(x[:6, : 6])
+
+# x = gol_triton_2d(x)
+# visualize_heatmap(x[:6, : 6])
+
+# x = gol_cuda(x)
+# visualize_heatmap(x[:6, : 6])
+
+x = gol_cuda_shared_memory(x)
 visualize_heatmap(x[:6, : 6])
 
+
+# x = longlong_encode(x)
+# x = gol_triton_64bit_1d(x)
+# x = longlong_decode(x)
+# visualize_heatmap(x[:6, : 6])
+
+
+# %%
+
+def get_roofline_ms(N):
+    return 2 * N * N / 696000000000 * 1000
+
+def get_bit_roofline_ms(N):
+    return get_roofline_ms(N) / 8
 
 # %%
 # Key results
 
+IS_ROOFLINE = False
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],
-        x_vals=[512 * i for i in range(2, 32, 2)],
+        x_vals=[512 * i for i in range(2, 32 + 1, 2)],
         line_arg='provider',
-        line_vals=['triton', 'triton_8bit', 'triton_32bit', 'triton_64bit'],
-        line_names=['Triton', 'Triton 8bit', 'Triton 32bit', 'Triton 64bit'],
+        line_vals=['torch', 'compiled_torch', 'triton', 'cuda', 'triton_32bit'],
+        line_names=['Torch', 'Compiled Torch', 'Triton', 'Cuda', 'Triton 32bit'],
         ylabel='ms',
         plot_name='gol main',
         args={}
@@ -1031,9 +1008,12 @@ def benchmark(provider, N):
     elif provider == 'triton_64bit':
         x = longlong_encode(x)
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_64bit_1d(x), quantiles=quantiles, rep=500)
+
+    if IS_ROOFLINE:
+        roofline_ms = get_roofline_ms(N) if 'bit' not in provider else get_bit_roofline_ms(N)
+        return roofline_ms / ms
     else:
-        raise ValueError(f"Invalid provider: {provider}")
-    return ms, min_ms, max_ms
+        return ms, min_ms, max_ms
 
 benchmark.run(print_data=True, show_plots=True)
 
@@ -1055,7 +1035,7 @@ benchmark.run(print_data=True, show_plots=True)
     ))
 def benchmark(provider, N):
     # create data
-    x = torch.randint(0, 256, (N, N // 8), device=device, dtype=torch.uint8)
+    x = torch.randint(0, 255, (N, N // 8), device=device, dtype=torch.uint8)
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'triton_8bit':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_8bit_1d(x), quantiles=quantiles, rep=500)
@@ -1072,7 +1052,7 @@ def benchmark(provider, N):
 benchmark.run(print_data=True, show_plots=True)
 
 # %%
-# Torch variants variants
+# Torch variants
 
 @triton.testing.perf_report(
     triton.testing.Benchmark(
@@ -1106,6 +1086,39 @@ def benchmark(provider, N):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_sum(x), quantiles=quantiles, rep=500)
     elif provider == 'compiled_torch_sum':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_sum_compiled(x), quantiles=quantiles, rep=500)
+    else:
+        raise ValueError(f"Invalid provider: {provider}")
+    return ms, min_ms, max_ms
+
+benchmark.run(print_data=True, show_plots=True)
+
+
+# %% 
+# cuda variants
+
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['N'],
+        x_vals=[512 * i for i in range(2, 32 + 1, 2)],
+        line_arg='provider',
+        line_vals=['compiled_torch', 'cuda', 'cuda_shared_memory'],
+        line_names=['Compiled Torch', 'Cuda', 'Cuda Shared Memory'],
+        ylabel='ms',
+        plot_name='gol bit variants',
+        args={}
+    ))
+def benchmark(provider, N):
+    print(provider, N)
+    # create data
+    x_shape = (N, N)
+    x = (torch.rand(x_shape, device=device) < 0.5).to(torch.int8).to(device)
+    quantiles = [0.5, 0.2, 0.8]
+    if provider == 'compiled_torch':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_conv2d_compiled(x), quantiles=quantiles, rep=500)
+    elif provider == 'cuda':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x), quantiles=quantiles, rep=500)
+    elif provider == 'cuda_shared_memory':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_shared_memory(x), quantiles=quantiles, rep=500)
     else:
         raise ValueError(f"Invalid provider: {provider}")
     return ms, min_ms, max_ms
