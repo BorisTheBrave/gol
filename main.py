@@ -233,9 +233,6 @@ def gol_cuda_shared_memory(x: torch.Tensor):
 
 # %%
 
-
-# %%
-
 @triton.jit
 def gol_triton_8bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
     row_id = tl.program_id(0)
@@ -1017,6 +1014,41 @@ def benchmark(provider, N):
 
 benchmark.run(print_data=True, show_plots=True)
 
+# %%
+# triton vs cuda comparisons
+# It's important to remember that triton BLOCK_SIZE is
+# not the same as cuda thread block size.
+# Essentially triton always uses a thread block size of (32*num_warps, 1, 1)
+# If BLOCK_SIZE is larger than that, it starts generates kernel's
+# that process more than one element.
+# Thus a like-for-like comparison requires setting num_warps = BLOCK_SIZE / 32
+# rather than the default of 4.
+
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['N'],
+        x_vals=[2**16],
+        line_arg='provider',
+        line_vals=['triton', 'cuda'],
+        line_names=['Triton', 'Cuda'],
+        ylabel='ms',
+        plot_name='gol main',
+        args={}
+    ))
+def benchmark(provider, N):
+    print(provider, N)
+    # create data
+    x_shape = (N, N)
+    x = torch.randint(0, 1, x_shape, device=device, dtype=torch.int8)
+    quantiles = [0.5, 0.2, 0.8]
+    if provider == 'triton':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_1d(x, BLOCK_SIZE=1024, num_warps = 32), quantiles=quantiles, rep=500)
+    elif provider == 'cuda':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x, BLOCK_SIZE_COL=256, BLOCK_SIZE_ROW=1), quantiles=quantiles, rep=500)
+
+    return ms, min_ms, max_ms
+
+benchmark.run(print_data=True, show_plots=True)
 
 # %% 
 # bit variants
