@@ -1042,7 +1042,7 @@ def benchmark(provider, N):
     x = torch.randint(0, 1, x_shape, device=device, dtype=torch.int8)
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'triton':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_1d(x, BLOCK_SIZE=1024, num_warps = 32), quantiles=quantiles, rep=500)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_1d(x, BLOCK_SIZE=256, num_warps=8, num_stages=1), quantiles=quantiles, rep=500)
     elif provider == 'cuda':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x, BLOCK_SIZE_COL=256, BLOCK_SIZE_ROW=1), quantiles=quantiles, rep=500)
 

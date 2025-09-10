@@ -3,34 +3,23 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
-__global__ void gol_kernel_i8(const int8_t* __restrict__ x_ptr, int8_t* __restrict__ out_ptr, long rowstride, long n) {
-  long x = blockIdx.x * blockDim.x + threadIdx.x;
-  long y = blockIdx.y * blockDim.y + threadIdx.y;
+__global__ void gol_kernel_i8(const int8_t* __restrict__ x_ptr, int8_t* __restrict__ out_ptr, int64_t rowstride, int64_t n) {
+  int64_t x = blockIdx.x * blockDim.x + threadIdx.x;
+  int64_t y = blockIdx.y * blockDim.y + threadIdx.y;
 
   if (x >= n - 2 || y >= n - 2) return;
 
-  int8_t r00 = 0;
-  int8_t r01 = 0;
-  int8_t r02 = 0;
-  int8_t r10 = 0;
-  int8_t r11 = 0;
-  int8_t r12 = 0;
-  int8_t r20 = 0;
-  int8_t r21 = 0;
-  int8_t r22 = 0;
+  int8_t r00 = x_ptr[y * rowstride + x + 0 * rowstride + 0];
+  int8_t r01 = x_ptr[y * rowstride + x + 0 * rowstride + 1];
+  int8_t r02 = x_ptr[y * rowstride + x + 0 * rowstride + 2];
 
-  r00 = x_ptr[y * rowstride + x + 0 * rowstride + 0];
-  r01 = x_ptr[y * rowstride + x + 0 * rowstride + 1];
-  r02 = x_ptr[y * rowstride + x + 0 * rowstride + 2];
+  int8_t r10 = x_ptr[y * rowstride + x + 1 * rowstride + 0];
+  int8_t r11 = x_ptr[y * rowstride + x + 1 * rowstride + 1];
+  int8_t r12 = x_ptr[y * rowstride + x + 1 * rowstride + 2];
 
-  r10 = x_ptr[y * rowstride + x + 1 * rowstride + 0];
-  r11 = x_ptr[y * rowstride + x + 1 * rowstride + 1];
-  r12 = x_ptr[y * rowstride + x + 1 * rowstride + 2];
-
-  r20 = x_ptr[y * rowstride + x + 2 * rowstride + 0];
-  r21 = x_ptr[y * rowstride + x + 2 * rowstride + 1];
-  r22 = x_ptr[y * rowstride + x + 2 * rowstride + 2];
-
+  int8_t r20 = x_ptr[y * rowstride + x + 2 * rowstride + 0];
+  int8_t r21 = x_ptr[y * rowstride + x + 2 * rowstride + 1];
+  int8_t r22 = x_ptr[y * rowstride + x + 2 * rowstride + 2];
 
   int8_t sum = r00 + r01 + r02 + r10 + r12 + r20 + r21 + r22;
 
