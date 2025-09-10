@@ -58,9 +58,9 @@ def gol_torch_sum_compiled(x: torch.Tensor):
 # %%
 
 @triton.jit
-def gol_triton_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl.constexpr):
-    row_id = tl.program_id(0)
-    col_id = tl.program_id(1)
+def gol_triton_1d_kernel(x_ptr, out_ptr, row_stride: tl.int64, N: tl.int64, BLOCK_SIZE: tl.constexpr):
+    col_id = tl.program_id(0)
+    row_id = tl.program_id(1)
 
     offsets0 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     offsets1 = col_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE) + 1
@@ -87,11 +87,11 @@ def gol_triton_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE: tl
     result = tl.where(row11 > 0, (sum == 2) | (sum == 3), sum == 3).to(tl.int8)
 
     out_offsets = offsets1
-    out_mask = (out_offsets >= 1) & (out_offsets < N - 1)
+    out_mask = (row_id + 1 < N) & (out_offsets >= 1) & (out_offsets < N - 1)
 
     tl.store(out_ptr + (row_id + 1) * row_stride + out_offsets, result, mask=out_mask)
 
-def gol_triton_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
+def gol_triton_1d(x: torch.Tensor, BLOCK_SIZE: int = None, num_warps: int = None, num_stages: int = None):
     # I don't understand block size tuning yet.
     # There seems to be a significant performance difference between 4096 and 8192.
     BLOCK_SIZE = BLOCK_SIZE or 1024
@@ -100,18 +100,18 @@ def gol_triton_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
 
     def grid(meta):
         bs = meta['BLOCK_SIZE']
-        return (x.shape[0] - 2, triton.cdiv(x.shape[1] - 2, bs))
+        return (triton.cdiv(x.shape[1] - 2, bs), x.shape[0] - 2)
     
-    gol_triton_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE, num_warps=4)
+    gol_triton_1d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE=BLOCK_SIZE, num_warps=num_warps, num_stages=num_stages)
 
     return output
 
 # %%
 
 @triton.jit
-def gol_triton_2d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZE_ROW: tl.constexpr, BLOCK_SIZE_COL: tl.constexpr):
-    row_id = tl.program_id(0)
-    col_id = tl.program_id(1)
+def gol_triton_2d_kernel(x_ptr, out_ptr, row_stride: tl.int64, N: tl.int64, BLOCK_SIZE_ROW: tl.constexpr, BLOCK_SIZE_COL: tl.constexpr):
+    row_id = tl.program_id(1)
+    col_id = tl.program_id(0)
 
 
     col_offsets0 = (col_id * BLOCK_SIZE_COL + tl.arange(0, BLOCK_SIZE_COL) + 0)[None, :]
@@ -154,8 +154,8 @@ def gol_triton_2d(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: i
     output = torch.empty_like(x)
 
     grid = (
-        triton.cdiv(x.shape[0] - 2, BLOCK_SIZE_ROW),
         triton.cdiv(x.shape[1] - 2, BLOCK_SIZE_COL),
+        triton.cdiv(x.shape[0] - 2, BLOCK_SIZE_ROW),
     )
 
     gol_triton_2d_kernel[grid](x, output, x.stride(0), x.shape[0], BLOCK_SIZE_ROW=BLOCK_SIZE_ROW, BLOCK_SIZE_COL=BLOCK_SIZE_COL, num_stages=1)
