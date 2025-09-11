@@ -68,7 +68,7 @@ void gol(torch::Tensor x, torch::Tensor out) {
 
   constexpr int BLOCK_Y = 4;
   constexpr int BLOCK_X = 64;
-  constexpr int PAD = 14;            // try {0,2,4,8}; 2 or 4 often helps on byte stencils
+  constexpr int PAD = 0;            // try {0,2,4,8}; 2 or 4 often helps on byte stencils
 
   dim3 block(BLOCK_X, BLOCK_Y);
   dim3 grid((W - 2 + BLOCK_X - 1) / BLOCK_X,

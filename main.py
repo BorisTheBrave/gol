@@ -3,6 +3,8 @@ import torch
 import triton
 import triton.language as tl
 import matplotlib.pyplot as plt
+from torch.utils.cpp_extension import load_inline
+
 
 
 # %%
@@ -15,14 +17,14 @@ device = torch.device('cuda:0')
 
 WEIGHT_F16 = torch.tensor([[1, 1, 1], [1, 0, 1], [1, 1, 1]])[None, None, :, :].to(torch.float16).to(device)
 
-def gol_torch_conv2d(x: torch.Tensor):
+def gol_torch_conv2d(x: torch.Tensor) -> torch.Tensor:
     y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), WEIGHT_F16)[0].to(torch.int8)
     y = torch.nn.functional.pad(y, (1, 1, 1, 1), value=0)
     y = torch.where(x > 0, (y == 2) | (y == 3), (y == 3)).to(torch.int8)
     return y
 
 @torch.compile
-def gol_torch_conv2d_compiled(x: torch.Tensor):
+def gol_torch_conv2d_compiled(x: torch.Tensor) -> torch.Tensor:
     return gol_torch_conv2d(x)
 
 # %%
@@ -50,6 +52,13 @@ def gol_torch_sum(x: torch.Tensor):
             y[1:-1, 1:-1] += x[s1, s2]
 
     return torch.where(x == 1, (y == 2) | (y == 3), (y == 3)).to(torch.int8)    
+
+def gol_torch_sum(x: torch.Tensor) -> torch.Tensor:
+    y = x[2:] + x[1:-1] + x[:-2]
+    z = y[:, 2:] + y[:, 1:-1] + y[:, :-2]
+    z = torch.nn.functional.pad(z, (1, 1, 1, 1), value=0)
+    return ((x == 1) & (z == 4)) | (z == 3).to(torch.int8)
+
 
 @torch.compile
 def gol_torch_sum_compiled(x: torch.Tensor):
@@ -185,8 +194,6 @@ def is_notebook() -> bool:
 #     sys.exit()
 
 # %%
-import torch
-from torch.utils.cpp_extension import load_inline
 
 ext = None
 def init_ext():
@@ -203,15 +210,12 @@ def init_ext():
 def gol_cuda(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
     if ext is None: init_ext()
     if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
-        BLOCK_SIZE_ROW = 4
-        BLOCK_SIZE_COL = 64
+        BLOCK_SIZE_ROW = 1
+        BLOCK_SIZE_COL = 128
     output = torch.empty_like(x)
     ext.gol(x, output, BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
     return output
 # %%
-import torch
-from torch.utils.cpp_extension import load_inline
-
 ext2 = None
 
 def init_ext2():
@@ -229,6 +233,28 @@ def gol_cuda_shared_memory(x: torch.Tensor):
     if ext2 is None: init_ext2()
     output = torch.empty_like(x)
     ext2.gol(x, output)
+    return output
+# %%
+ext3 = None
+
+def init_ext3():
+    global ext3
+    ext3 = load_inline(
+        name="gol3_ext",
+        cpp_sources="",            # no separate C++ binding file
+        cuda_sources=[open("kernel3.cpp").read()],   # contains both kernel and PYBIND11 module
+        with_cuda=True,
+        extra_cuda_cflags=["-O3"],
+        verbose=True,
+    )
+
+def gol_cuda_32bit(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+    if ext3 is None: init_ext3()
+    if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
+        BLOCK_SIZE_ROW = 1
+        BLOCK_SIZE_COL = 1024
+    output = torch.empty_like(x)
+    ext3.gol(x, output, BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
     return output
 
 # %%
@@ -974,8 +1000,8 @@ IS_ROOFLINE = False
         x_names=['N'],
         x_vals=[512 * i for i in range(2, 32 + 1, 2)],
         line_arg='provider',
-        line_vals=['torch', 'compiled_torch', 'triton', 'cuda', 'triton_32bit'],
-        line_names=['Torch', 'Compiled Torch', 'Triton', 'Cuda', 'Triton 32bit'],
+        line_vals=['torch', 'compiled_torch', 'triton', 'cuda', 'triton_32bit', 'cuda_shared_memory', 'cuda_32bit'],
+        line_names=['Torch', 'Compiled Torch', 'Triton', 'Cuda', 'Triton 32bit', 'Cuda Shared Memory', 'Cuda 32bit'],
         ylabel='ms',
         plot_name='gol main',
         args={}
@@ -994,8 +1020,10 @@ def benchmark(provider, N):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_1d(x), quantiles=quantiles, rep=500)
     elif provider == 'cuda':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x), quantiles=quantiles, rep=500)
-    elif provider == 'cuda2':
+    elif provider == 'cuda_shared_memory':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_shared_memory(x), quantiles=quantiles, rep=500)
+    elif provider == 'cuda_32bit':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_32bit(x), quantiles=quantiles, rep=500)
     elif provider == 'triton_8bit':
         x = bit_encode(x)
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_8bit_1d(x), quantiles=quantiles, rep=500)
@@ -1057,7 +1085,8 @@ benchmark.run(print_data=True, show_plots=True)
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],
-        x_vals=[8*512 * i for i in range(2, 32, 2)],
+        # x_vals=[8*512 * i for i in range(2, 32, 2)],
+        x_vals=[2**16],
         line_arg='provider',
         line_vals=['triton_8bit', 'triton_32bit', 'triton_64bit'],
         line_names=['Triton 8bit', 'Triton 32bit', 'Triton 64bit'],
@@ -1089,7 +1118,7 @@ benchmark.run(print_data=True, show_plots=True)
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],
-        x_vals=[512 * i for i in range(2, 16, 2)],
+        x_vals=[2**16],
         line_arg='provider',
         line_vals=['torch', 'compiled_torch', 'triton', 'torch_f16', 'compiled_torch_f16', 'torch_sum', 'compiled_torch_sum'],
         line_names=['Torch', 'Compiled Torch', 'Triton', 'Torch F16', 'Compiled Torch F16', 'Torch Sum', 'Compiled Torch Sum'],
@@ -1131,19 +1160,20 @@ benchmark.run(print_data=True, show_plots=True)
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],
-        x_vals=[512 * i for i in range(2, 32 + 1, 2)],
+        # x_vals=[512 * i for i in range(2, 32 + 1, 2)],
+        x_vals=[2**16],
         line_arg='provider',
-        line_vals=['compiled_torch', 'cuda', 'cuda_shared_memory'],
-        line_names=['Compiled Torch', 'Cuda', 'Cuda Shared Memory'],
+        line_vals=['compiled_torch', 'cuda', 'cuda_shared_memory', 'cuda_32bit'],
+        line_names=['Compiled Torch', 'Cuda', 'Cuda Shared Memory', 'Cuda 32bit'],
         ylabel='ms',
-        plot_name='gol bit variants',
+        plot_name='gol cuda variants',
         args={}
     ))
 def benchmark(provider, N):
     print(provider, N)
     # create data
     x_shape = (N, N)
-    x = (torch.rand(x_shape, device=device) < 0.5).to(torch.int8).to(device)
+    x = torch.randint(0, 1, x_shape, device=device, dtype=torch.int8)
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'compiled_torch':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_torch_conv2d_compiled(x), quantiles=quantiles, rep=500)
@@ -1151,6 +1181,8 @@ def benchmark(provider, N):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x), quantiles=quantiles, rep=500)
     elif provider == 'cuda_shared_memory':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_shared_memory(x), quantiles=quantiles, rep=500)
+    elif provider == 'cuda_32bit':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_32bit(x), quantiles=quantiles, rep=500)
     else:
         raise ValueError(f"Invalid provider: {provider}")
     return ms, min_ms, max_ms
@@ -1186,16 +1218,22 @@ benchmark.run(print_data=True, show_plots=True)
 # %%
 # Test 2d block sizes
 
+TEST_FN = gol_cuda_32bit
+MAX_BLOCK_SIZE = 10 if TEST_FN == gol_cuda else 12
+IS_TRITON = TEST_FN == gol_triton_2d
+
 block_sizes = [
-    (1 * (2**i), 1 * (2**j)) for i in range(0, 9) for j in range(0 , 12)
-    if i + j < 11
+    (1 * (2**i), 1 * (2**j)) for i in range(0, 9) for j in range(0, MAX_BLOCK_SIZE + 1)
+    if i + j < MAX_BLOCK_SIZE
+    if (j >= 2 if TEST_FN == gol_cuda_32bit else True)
 ]
 def block_str(size):
     return str(size[0]) + "x" + str(size[1])
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=['N'],
-        x_vals=[512 * i for i in range(2, 16, 2)],
+        # x_vals=[512 * i for i in range(2, 16, 2)],
+        x_vals=[2**16],
         line_arg='block_sizes',
         line_vals=block_sizes,
         line_names=[block_str(size) for size in block_sizes],
@@ -1207,18 +1245,18 @@ def block_str(size):
 def benchmark(block_sizes, N):
     # create data
     x_shape = (N, N)
-    x = (torch.rand(x_shape, device=device) < 0.5).to(torch.int8).to(device)
+    x = (torch.randint(0, 1, x_shape, device=device, dtype=torch.int8))
     quantiles = [0.5, 0.2, 0.8]
-    # ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_2d(x, BLOCK_SIZE_ROW=block_sizes[0], BLOCK_SIZE_COL=block_sizes[1]), quantiles=quantiles, rep=500)
     print(block_sizes)
-    ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x, BLOCK_SIZE_ROW=block_sizes[0], BLOCK_SIZE_COL=block_sizes[1]), quantiles=quantiles, rep=500)
+    ms, min_ms, max_ms = triton.testing.do_bench(lambda: TEST_FN(x, BLOCK_SIZE_ROW=block_sizes[0], BLOCK_SIZE_COL=block_sizes[1]), quantiles=quantiles, rep=500)
     return ms, min_ms, max_ms
 
 result = benchmark.run(return_df=True)
 
 result
-
 # %%
+
+#result['1x1'][0]= float('nan')
 
 row_sizes = set([size[0] for size in block_sizes])
 col_sizes = set([size[1] for size in block_sizes])
@@ -1229,7 +1267,7 @@ for row_size in row_sizes:
     for col_size in col_sizes:
         s = block_str((row_size, col_size))
         if s in result:
-            data[(row_size, col_size)] = result[s][6].item()
+            data[(row_size, col_size)] = result[s][0].item()
 
 import numpy as np
 
@@ -1251,13 +1289,25 @@ plt.figure(figsize=(8, 6))
 # Use 'viridis' colormap, 'lower' origin to have (0,0) at bottom-left, and 'auto' aspect ratio
 plt.imshow(heatmap_matrix, cmap='viridis', origin='lower', aspect='auto')
 
+# Find the minimum value and its coordinates
+min_value = np.nanmin(heatmap_matrix)
+min_row_idx, min_col_idx = np.unravel_index(np.nanargmin(heatmap_matrix), heatmap_matrix.shape)
+
+# Highlight the cell with the lowest value
+from matplotlib.patches import Rectangle
+current_ax = plt.gca()
+rect = Rectangle((min_col_idx - 0.5, min_row_idx - 0.5), 1, 1,
+                 linewidth=3, edgecolor='red', facecolor='none')
+current_ax.add_patch(rect)
+
+
 # Set ticks and labels for the axes
 plt.xticks(np.arange(len(sorted_col_sizes)), sorted_col_sizes)
 plt.yticks(np.arange(len(sorted_row_sizes)), sorted_row_sizes)
 
 plt.xlabel("BLOCK_SIZE_COL")
 plt.ylabel("BLOCK_SIZE_ROW")
-plt.title("Median Execution Time (ms) for gol_cuda Block Sizes")
+plt.title(f"Execution Time for gol_{TEST_FN.__name__} Block Sizes")
 
 # Add a colorbar to indicate the scale of execution times
 cbar = plt.colorbar()
@@ -1271,3 +1321,10 @@ for i in range(len(sorted_row_sizes)):
 
 plt.tight_layout() # Adjust plot to ensure everything fits without overlapping
 plt.show()
+
+# %%
+x = torch.randint(0, 1, (2**16, 2**16), device=device, dtype=torch.int8)
+out = torch.empty_like(x)
+k = gol_triton_2d_kernel.warmup(x, out, x.stride(0), x.shape[0], BLOCK_SIZE_ROW=4, BLOCK_SIZE_COL=256, grid=(1, 1))
+print(k.asm['llir'])
+# %%
