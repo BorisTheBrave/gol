@@ -14,7 +14,7 @@ device = torch.device('cuda:0')
 # %%
 # Test data
 x = torch.tensor([[0, 0, 0, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 0, 0, 0]]).to(torch.int8).to(device)
-x = torch.zeros((64, 64)).to(torch.int8).to(device)
+x = torch.zeros((1024, 1024)).to(torch.int8).to(device)
 x[2, 1] = 1
 x[2, 2] = 1
 x[2, 3] = 1
