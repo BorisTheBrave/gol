@@ -324,6 +324,30 @@ def gol_cuda_bitpacked_64(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZ
     output = torch.empty_like(x)
     ext6.gol(x.view(torch.uint64), output.view(torch.uint64), BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
     return output
+    
+# %%
+ext7 = None 
+
+def init_ext7():
+    global ext7
+    ext7 = load_inline(
+        name="gol7_ext",
+        cpp_sources="",            # no separate C++ binding file
+        cuda_sources=[open("kernel7.cpp").read()],   # contains both kernel and PYBIND11 module
+        with_cuda=True,
+        extra_cuda_cflags=["-O3"],
+        verbose=True,
+    )
+
+def gol_cuda_grouped_bitpacked_64(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+    
+    if ext7 is None: init_ext7()
+    if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
+        BLOCK_SIZE_ROW = 1
+        BLOCK_SIZE_COL = 1024
+    output = torch.empty_like(x)
+    ext7.gol(x.view(torch.uint64), output.view(torch.uint64), BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
+    return output
 
 # %%
 
@@ -1290,7 +1314,7 @@ benchmark.run(print_data=True, show_plots=True)
 # %%
 # Test 2d block sizes
 
-TEST_FN = gol_cuda_bitpacked_64
+TEST_FN = gol_cuda_grouped_bitpacked_64
 MAX_BLOCK_SIZE = {
     gol_cuda: 10, 
     gol_cuda_wideload: 12,
@@ -1298,14 +1322,19 @@ MAX_BLOCK_SIZE = {
     gol_cuda_grouped: 12,
     gol_cuda_bitpacked: 10,
     gol_cuda_bitpacked_64: 10,
+    gol_cuda_grouped_bitpacked_64: 12,
 }[TEST_FN]
 IS_TRITON = TEST_FN == gol_triton_2d
 
 block_sizes = [
     (1 * (2**i), 1 * (2**j)) for i in range(0, 9) for j in range(0, MAX_BLOCK_SIZE + 1)
+    # CUDA has a limit on the number of threads
     if i + j <= MAX_BLOCK_SIZE
+    # Warp size 32, rarely any point trying lower than that
     if i + j >= 5
+    # Some kernels have frequirements on the multiple of the block size.
     if (j >= 2 if TEST_FN in [gol_cuda_wideload, gol_cuda_grouped] else True)
+    if (i >= 2 if TEST_FN in [gol_cuda_grouped_bitpacked_64] else True)
 ]
 def block_str(size):
     return str(size[0]) + "x" + str(size[1])
@@ -1333,9 +1362,10 @@ def benchmark(block_sizes, N):
     ms, min_ms, max_ms = triton.testing.do_bench(lambda: TEST_FN(x, BLOCK_SIZE_ROW=block_sizes[0], BLOCK_SIZE_COL=block_sizes[1]), quantiles=quantiles, rep=500)
     return ms, min_ms, max_ms
 
-result = benchmark.run(return_df=True)
+result = benchmark.run(return_df=True, show_plots=False)
 
 result
+
 # %%
 
 #result['1x1'][0]= float('nan')
@@ -1402,7 +1432,9 @@ for i in range(len(sorted_row_sizes)):
                  ha="center", va="center", color="w", fontsize=9) # White text for better contrast on viridis
 
 plt.tight_layout() # Adjust plot to ensure everything fits without overlapping
+plt.savefig(f"images/block_sizes_2d_{TEST_FN.__name__}.png")
 plt.show()
+
 
 # %%
 x = torch.randint(0, 1, (2**16, 2**16), device=device, dtype=torch.int8)
