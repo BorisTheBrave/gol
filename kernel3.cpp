@@ -72,7 +72,7 @@ void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_
   const long n = x.size(0);
   const int block_size_col32 = block_size_col / 4;
   const int row_blocks  = (n - 2 + block_size_row - 1) / block_size_row;
-  const int col_blocks  = (n - 2 + block_size_col - 1) / block_size_col32;
+  const int col_blocks  = (n - 2 + block_size_col - 1) / block_size_col;
   auto stream = at::cuda::getCurrentCUDAStream();
 
   dim3 grid(col_blocks, row_blocks);

@@ -251,10 +251,32 @@ def init_ext3():
 def gol_cuda_32bit(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
     if ext3 is None: init_ext3()
     if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
-        BLOCK_SIZE_ROW = 1
-        BLOCK_SIZE_COL = 1024
+        BLOCK_SIZE_ROW = 4
+        BLOCK_SIZE_COL = 512
     output = torch.empty_like(x)
     ext3.gol(x, output, BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
+    return output
+# %%
+ext4 = None 
+
+def init_ext4():
+    global ext4
+    ext4 = load_inline(
+        name="gol4_ext",
+        cpp_sources="",            # no separate C++ binding file
+        cuda_sources=[open("kernel4.cpp").read()],   # contains both kernel and PYBIND11 module
+        with_cuda=True,
+        extra_cuda_cflags=["-O3"],
+        verbose=True,
+    )
+
+def gol_cuda_grouped(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+    if ext4 is None: init_ext4()
+    if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
+        BLOCK_SIZE_ROW = 1
+        BLOCK_SIZE_COL = 512
+    output = torch.empty_like(x)
+    ext4.gol(x, output, BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
     return output
 
 # %%
@@ -972,7 +994,10 @@ x[2, 3] = 1
 # x = gol_cuda(x)
 # visualize_heatmap(x[:6, : 6])
 
-x = gol_cuda_shared_memory(x)
+# x = gol_cuda_shared_memory(x)
+# visualize_heatmap(x[:6, : 6])
+
+x = gol_cuda_32bit(x)
 visualize_heatmap(x[:6, : 6])
 
 
@@ -1218,14 +1243,22 @@ benchmark.run(print_data=True, show_plots=True)
 # %%
 # Test 2d block sizes
 
-TEST_FN = gol_cuda_32bit
-MAX_BLOCK_SIZE = 10 if TEST_FN == gol_cuda else 12
+TEST_FN = gol_cuda_grouped
+MAX_BLOCK_SIZE = {
+    gol_cuda: 10, 
+    gol_cuda_32bit: 12,
+    gol_triton_2d: 12,
+    gol_cuda_grouped: 12,
+}[TEST_FN]
 IS_TRITON = TEST_FN == gol_triton_2d
 
 block_sizes = [
     (1 * (2**i), 1 * (2**j)) for i in range(0, 9) for j in range(0, MAX_BLOCK_SIZE + 1)
-    if i + j < MAX_BLOCK_SIZE
-    if (j >= 2 if TEST_FN == gol_cuda_32bit else True)
+    if i + j <= MAX_BLOCK_SIZE
+    if i + j >= 5
+    if (j >= 2 if TEST_FN in [gol_cuda_32bit, gol_cuda_grouped] else True)
+    # if (i >= 4 if TEST_FN == gol_cuda_grouped else True)
+    if j >= 5
 ]
 def block_str(size):
     return str(size[0]) + "x" + str(size[1])
@@ -1328,3 +1361,27 @@ out = torch.empty_like(x)
 k = gol_triton_2d_kernel.warmup(x, out, x.stride(0), x.shape[0], BLOCK_SIZE_ROW=4, BLOCK_SIZE_COL=256, grid=(1, 1))
 print(k.asm['llir'])
 # %%
+
+# Plot all results (as recorded on a A40 for N=2**16)
+durations = {
+    "Pytorch": 223,
+    "torch.compile": 38.1,
+    "Naive CUDA\n$(1\\times128)$": 26,
+    "Naive Triton\n$(4\\times256)$": 22.5,
+    "Grouped CUDA\n$(1\\times512)$": 14.7,
+    "Bitpacked 8-bit Triton\n$(1\\times128)$": 14.9,
+    "Bitpacked 32-bit Triton\n$(1\\times256)$": 5.21,
+}
+
+labels = list(durations.keys())[1:]
+values = list(durations.values())[1:]
+plt.text(0.5, 0.95, "(lower is better)", ha='center', va='top', transform=plt.gca().transAxes, fontsize=10)
+
+plt.bar(labels, values, color='skyblue')
+plt.ylabel("Execution Time (ms)")
+plt.xlabel("Optimal block size shown as (rows$\\times$cols)")
+plt.title("Game of Life Implementations Performance ($N=2^{16}$, device=A40)")
+plt.xticks(rotation=45, ha='right') # Rotate labels for better readability
+plt.grid(axis='y', linestyle='--', alpha=0.7) # Add a grid for easier comparison
+plt.tight_layout() # Adjust layout to prevent labels from overlapping
+plt.show()

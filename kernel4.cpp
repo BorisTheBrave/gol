@@ -1,0 +1,72 @@
+
+#include <cuda_runtime.h>
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+
+#define COL_GROUP_SIZE 4
+#define ROW_GROUP_SIZE 1
+
+__global__ void gol_kernel_grouped(const int8_t* __restrict__ x_ptr, int8_t* __restrict__ out_ptr, int64_t rowstride, int64_t n) {
+  for (int j = 0; j < ROW_GROUP_SIZE; j++) {
+    int64_t y = (blockIdx.y * blockDim.y + threadIdx.y) * ROW_GROUP_SIZE + j;
+    if (y >= n - 2) break;
+
+    for (int i = 0; i < COL_GROUP_SIZE; i++) {
+        int64_t x = (blockIdx.x * blockDim.x + threadIdx.x) * COL_GROUP_SIZE + i;
+        if (x >= n - 2) break;
+
+        int8_t r00 = x_ptr[y * rowstride + x + 0 * rowstride + 0];
+        int8_t r01 = x_ptr[y * rowstride + x + 0 * rowstride + 1];
+        int8_t r02 = x_ptr[y * rowstride + x + 0 * rowstride + 2];
+
+        int8_t r10 = x_ptr[y * rowstride + x + 1 * rowstride + 0];
+        int8_t r11 = x_ptr[y * rowstride + x + 1 * rowstride + 1];
+        int8_t r12 = x_ptr[y * rowstride + x + 1 * rowstride + 2];
+
+        int8_t r20 = x_ptr[y * rowstride + x + 2 * rowstride + 0];
+        int8_t r21 = x_ptr[y * rowstride + x + 2 * rowstride + 1];
+        int8_t r22 = x_ptr[y * rowstride + x + 2 * rowstride + 2];
+
+        int8_t sum = r00 + r01 + r02 + r10 + r12 + r20 + r21 + r22;
+
+        int8_t result = (r11 > 0) ? ((sum == 2) || (sum == 3) ? 1 : 0) : (sum == 3 ? 1 : 0);
+
+        out_ptr[(y + 1) * rowstride + (x + 1)] = result;
+    }
+  }
+}
+
+void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_col) {
+  TORCH_CHECK(x.is_cuda(), "x must be CUDA tensors");
+  TORCH_CHECK(x.scalar_type() == at::kChar, "only int8");
+  TORCH_CHECK(x.stride(1) == 1, "colstride must be 1");
+  TORCH_CHECK(x.dim() == 2, "x must be 2D");
+  TORCH_CHECK(x.size(0) == x.size(1), "x must be square");
+  TORCH_CHECK(out.is_cuda(), "out must be CUDA tensors");
+  TORCH_CHECK(out.scalar_type() == at::kChar, "only int8");
+  TORCH_CHECK(out.stride(1) == 1, "colstride must be 1");
+  TORCH_CHECK(out.dim() == 2, "out must be 2D");
+  TORCH_CHECK(out.size(0) == x.size(0), "out must have the same height");
+  TORCH_CHECK(out.size(1) == x.size(1), "out must have the same width");
+
+  TORCH_CHECK(block_size_col % COL_GROUP_SIZE == 0, "block_size_col must be divisible by COL_GROUP_SIZE");
+  TORCH_CHECK(block_size_row % ROW_GROUP_SIZE == 0, "block_size_row must be divisible by ROW_GROUP_SIZE");
+  TORCH_CHECK(x.size(0) % COL_GROUP_SIZE == 0, "n must be divisible by COL_GROUP_SIZE");
+  TORCH_CHECK(x.size(1) % ROW_GROUP_SIZE == 0, "n must be divisible by ROW_GROUP_SIZE");
+
+  const long n = x.size(0);
+  const int row_blocks  = (n - 2 + block_size_row - 1) / block_size_row;
+  const int col_blocks  = (n - 2 + block_size_col - 1) / block_size_col;
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  dim3 grid(col_blocks, row_blocks);
+  dim3 block(block_size_col / COL_GROUP_SIZE, block_size_row / ROW_GROUP_SIZE);
+
+  gol_kernel_grouped<<<grid, block, 0, stream>>>(
+      x.data_ptr<int8_t>(), out.data_ptr<int8_t>(), x.stride(0), n);
+  TORCH_CHECK(cudaGetLastError() == cudaSuccess, "kernel launch failed");
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("gol", &gol, "gol (CUDA, int8)");
+}
