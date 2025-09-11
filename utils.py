@@ -4,10 +4,6 @@ import matplotlib.pyplot as plt
 
 
 # %%
-device = torch.device('cuda:0')
-
-
-# %%
 def is_notebook() -> bool:
     try:
         from IPython import get_ipython

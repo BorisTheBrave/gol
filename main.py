@@ -4,11 +4,12 @@ import triton
 import matplotlib.pyplot as plt
 import numpy as np
 
-from utils import device, visualize_heatmap, bit_encode, bit_decode, long_encode, long_decode, longlong_encode, longlong_decode
+from utils import visualize_heatmap, bit_encode, bit_decode, long_encode, long_decode, longlong_encode, longlong_decode
 from gol_torch import gol_torch_conv2d, gol_torch_conv2d_compiled, gol_torch_conv2d_f16, gol_torch_conv2d_f16_compiled, gol_torch_sum, gol_torch_sum_compiled
 from gol_cuda import gol_cuda, gol_cuda_shared_memory, gol_cuda_wideload, gol_cuda_grouped, gol_cuda_bitpacked, gol_cuda_bitpacked_64, gol_cuda_grouped_bitpacked_64
 from gol_triton import gol_triton_1d, gol_triton_2d, gol_triton_8bit_1d, gol_triton_32bit_1d, gol_triton_64bit_1d, gol_triton_2d_kernel
 
+device = torch.device('cuda:0')
 
 # %%
 # Test data

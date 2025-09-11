@@ -9,7 +9,7 @@ WEIGHT_F16 = torch.tensor([[1, 1, 1], [1, 0, 1], [1, 1, 1]])[None, None, :, :].t
 
 def gol_torch_conv2d(x: torch.Tensor) -> torch.Tensor:
     w = WEIGHT_F16.to(x.device)
-    y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), )[0].to(torch.int8)
+    y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), w)[0].to(torch.int8)
     y = torch.nn.functional.pad(y, (1, 1, 1, 1), value=0)
     y = torch.where(x > 0, (y == 2) | (y == 3), (y == 3)).to(torch.int8)
     return y
@@ -22,7 +22,8 @@ def gol_torch_conv2d_compiled(x: torch.Tensor) -> torch.Tensor:
 
 # %%
 def gol_torch_conv2d_f16(x: torch.Tensor):
-    y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), WEIGHT_F16)[0]
+    w = WEIGHT_F16.to(x.device)
+    y = torch.nn.functional.conv2d(x[None, :, :].to(dtype=torch.float16), w)[0]
     y = torch.nn.functional.pad(y, (1, 1, 1, 1), value=0)
     y = torch.where(x > 0, (y == 2) | (y == 3), (y == 3)).to(torch.float16)
     return y
