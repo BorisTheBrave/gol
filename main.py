@@ -101,8 +101,6 @@ def gol_triton_1d_kernel(x_ptr, out_ptr, row_stride: tl.int64, N: tl.int64, BLOC
     tl.store(out_ptr + (row_id + 1) * row_stride + out_offsets, result, mask=out_mask)
 
 def gol_triton_1d(x: torch.Tensor, BLOCK_SIZE: int = None, num_warps: int = None, num_stages: int = None):
-    # I don't understand block size tuning yet.
-    # There seems to be a significant performance difference between 4096 and 8192.
     BLOCK_SIZE = BLOCK_SIZE or 1024
 
     output = torch.empty_like(x)
@@ -248,7 +246,7 @@ def init_ext3():
         verbose=True,
     )
 
-def gol_cuda_32bit(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+def gol_cuda_wideload(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
     if ext3 is None: init_ext3()
     if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
         BLOCK_SIZE_ROW = 4
@@ -277,6 +275,54 @@ def gol_cuda_grouped(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL
         BLOCK_SIZE_COL = 512
     output = torch.empty_like(x)
     ext4.gol(x, output, BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
+    return output
+
+# %%
+ext5 = None 
+
+def init_ext5():
+    global ext5
+    ext5 = load_inline(
+        name="gol5_ext",
+        cpp_sources="",            # no separate C++ binding file
+        cuda_sources=[open("kernel5.cpp").read()],   # contains both kernel and PYBIND11 module
+        with_cuda=True,
+        extra_cuda_cflags=["-O3"],
+        verbose=True,
+    )
+
+def gol_cuda_bitpacked(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+    
+    if ext5 is None: init_ext5()
+    if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
+        BLOCK_SIZE_ROW = 4
+        BLOCK_SIZE_COL = 32
+    output = torch.empty_like(x)
+    ext5.gol(x, output, BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
+    return output
+
+# %%
+ext6 = None 
+
+def init_ext6():
+    global ext6
+    ext6 = load_inline(
+        name="gol6_ext",
+        cpp_sources="",            # no separate C++ binding file
+        cuda_sources=[open("kernel6.cpp").read()],   # contains both kernel and PYBIND11 module
+        with_cuda=True,
+        extra_cuda_cflags=["-O3"],
+        verbose=True,
+    )
+
+def gol_cuda_bitpacked_64(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+    
+    if ext6 is None: init_ext6()
+    if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
+        BLOCK_SIZE_ROW = 1
+        BLOCK_SIZE_COL = 1024
+    output = torch.empty_like(x)
+    ext6.gol(x.view(torch.uint64), output.view(torch.uint64), BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
     return output
 
 # %%
@@ -377,8 +423,6 @@ def gol_triton_8bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZ
     tl.store(out_ptr + row_id * row_stride + out_offsets, result, mask=out_mask)
 
 def gol_triton_8bit_1d(x: torch.Tensor, BLOCK_SIZE: int = None):
-    # I don't understand block size tuning yet.
-    # There seems to be a significant performance difference between 4096 and 8192.
     BLOCK_SIZE = BLOCK_SIZE or 128
 
     output = torch.empty_like(x)
@@ -1188,8 +1232,8 @@ benchmark.run(print_data=True, show_plots=True)
         # x_vals=[512 * i for i in range(2, 32 + 1, 2)],
         x_vals=[2**16],
         line_arg='provider',
-        line_vals=['compiled_torch', 'cuda', 'cuda_shared_memory', 'cuda_32bit'],
-        line_names=['Compiled Torch', 'Cuda', 'Cuda Shared Memory', 'Cuda 32bit'],
+        line_vals=['compiled_torch', 'cuda', 'cuda_shared_memory', 'cuda_wideload', 'cuda_bitpacked'],
+        line_names=['Compiled Torch', 'Cuda', 'Cuda Shared Memory', 'Cuda Wideload', 'Cuda Bitpacked'],
         ylabel='ms',
         plot_name='gol cuda variants',
         args={}
@@ -1206,8 +1250,11 @@ def benchmark(provider, N):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x), quantiles=quantiles, rep=500)
     elif provider == 'cuda_shared_memory':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_shared_memory(x), quantiles=quantiles, rep=500)
-    elif provider == 'cuda_32bit':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_32bit(x), quantiles=quantiles, rep=500)
+    elif provider == 'cuda_wideload':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_wideload(x), quantiles=quantiles, rep=500)
+    elif provider == 'cuda_bitpacked':
+        x = bit_encode(x)
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_bitpacked(x), quantiles=quantiles, rep=500)
     else:
         raise ValueError(f"Invalid provider: {provider}")
     return ms, min_ms, max_ms
@@ -1243,12 +1290,14 @@ benchmark.run(print_data=True, show_plots=True)
 # %%
 # Test 2d block sizes
 
-TEST_FN = gol_cuda_grouped
+TEST_FN = gol_cuda_bitpacked_64
 MAX_BLOCK_SIZE = {
     gol_cuda: 10, 
-    gol_cuda_32bit: 12,
+    gol_cuda_wideload: 12,
     gol_triton_2d: 12,
     gol_cuda_grouped: 12,
+    gol_cuda_bitpacked: 10,
+    gol_cuda_bitpacked_64: 10,
 }[TEST_FN]
 IS_TRITON = TEST_FN == gol_triton_2d
 
@@ -1256,9 +1305,7 @@ block_sizes = [
     (1 * (2**i), 1 * (2**j)) for i in range(0, 9) for j in range(0, MAX_BLOCK_SIZE + 1)
     if i + j <= MAX_BLOCK_SIZE
     if i + j >= 5
-    if (j >= 2 if TEST_FN in [gol_cuda_32bit, gol_cuda_grouped] else True)
-    # if (i >= 4 if TEST_FN == gol_cuda_grouped else True)
-    if j >= 5
+    if (j >= 2 if TEST_FN in [gol_cuda_wideload, gol_cuda_grouped] else True)
 ]
 def block_str(size):
     return str(size[0]) + "x" + str(size[1])
@@ -1281,6 +1328,8 @@ def benchmark(block_sizes, N):
     x = (torch.randint(0, 1, x_shape, device=device, dtype=torch.int8))
     quantiles = [0.5, 0.2, 0.8]
     print(block_sizes)
+    if 'bitpacked' in TEST_FN.__name__:
+        x = bit_encode(x)
     ms, min_ms, max_ms = triton.testing.do_bench(lambda: TEST_FN(x, BLOCK_SIZE_ROW=block_sizes[0], BLOCK_SIZE_COL=block_sizes[1]), quantiles=quantiles, rep=500)
     return ms, min_ms, max_ms
 
@@ -1340,7 +1389,7 @@ plt.yticks(np.arange(len(sorted_row_sizes)), sorted_row_sizes)
 
 plt.xlabel("BLOCK_SIZE_COL")
 plt.ylabel("BLOCK_SIZE_ROW")
-plt.title(f"Execution Time for gol_{TEST_FN.__name__} Block Sizes")
+plt.title(f"Execution Time for {TEST_FN.__name__} Block Sizes")
 
 # Add a colorbar to indicate the scale of execution times
 cbar = plt.colorbar()
@@ -1371,6 +1420,7 @@ durations = {
     "Grouped CUDA\n$(1\\times512)$": 14.7,
     "Bitpacked 8-bit Triton\n$(1\\times128)$": 14.9,
     "Bitpacked 32-bit Triton\n$(1\\times256)$": 5.21,
+    "Bitpacked 64-bit CUDA\n$(1\\times1024)$": 1.84,
 }
 
 labels = list(durations.keys())[1:]
