@@ -36,21 +36,21 @@ __global__ void gol_kernel_i32(const int8_t* __restrict__ x_ptr, int8_t* __restr
   uint32_t sum2 = (s >> 16) & 0xFF;
   uint32_t sum3 = (s >> 24) & 0xFF;
 
-  uint32_t alive0 = (r10 >> 0) & 1;
-  uint32_t alive1 = (r10 >> 1) & 1;
-  uint32_t alive2 = (r10 >> 2) & 1;
-  uint32_t alive3 = (r10 >> 3) & 1;
+  uint32_t alive1 = (r10 >> 8) & 1;
+  uint32_t alive2 = (r10 >> 16) & 1;
+  uint32_t alive3 = (r10 >> 24) & 1;
+  uint32_t alive4 = (r11 >> 0) & 1;
 
-  uint8_t result0 = (alive0 & (sum0 == 4)) | (sum0 == 3);
-  int8_t result1 = (alive1 & (sum1 == 4)) | (sum1 == 3);
-  uint8_t result2 = (alive2 & (sum2 == 4)) | (sum2 == 3);
-  uint8_t result3 = (alive3 & (sum3 == 4)) | (sum3 == 3);
+  uint8_t result1 = (alive1 & (sum0 == 4)) | (sum0 == 3);
+  uint8_t result2 = (alive2 & (sum1 == 4)) | (sum1 == 3);
+  uint8_t result3 = (alive3 & (sum2 == 4)) | (sum2 == 3);
+  uint8_t result4 = (alive4 & (sum3 == 4)) | (sum3 == 3);
 
   // We write out per byte as it's not aligned to 32 bits
-                 out_ptr[(y + 1) * rowstride + (x + 1)] = result0;
-                 out_ptr[(y + 1) * rowstride + (x + 2)] = result1;
-                 out_ptr[(y + 1) * rowstride + (x + 3)] = result2;
-  if (x + 4 < n) out_ptr[(y + 1) * rowstride + (x + 4)] = result3;
+                 out_ptr[(y + 1) * rowstride + (x + 1)] = result1;
+                 out_ptr[(y + 1) * rowstride + (x + 2)] = result2;
+                 out_ptr[(y + 1) * rowstride + (x + 3)] = result3;
+  if (x + 4 < n) out_ptr[(y + 1) * rowstride + (x + 4)] = result4;
 }
 
 void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_col) {

@@ -8,19 +8,19 @@ __global__ void gol_kernel_bitpacked(const uint8_t* __restrict__ x_ptr, uint8_t*
   int64_t y = blockIdx.y * blockDim.y + threadIdx.y;
 
   if (y >= n - 2) return;
-  if (x >= n) return;
+  if (x >= n / 8) return;
 
-  uint8_t r00 = x_ptr[y * rowstride + 0 * rowstride + x + 0];
-  uint8_t r01 = (x + 1 < n) ? x_ptr[y * rowstride + 0 * rowstride + x + 1] : 0;
-  uint8_t r02 = (x + 2 < n) ? x_ptr[y * rowstride + 0 * rowstride + x + 2] : 0;
+  uint8_t r00 =                   x_ptr[y * rowstride + 0 * rowstride + x + 0];
+  uint8_t r01 = (x + 1 < n / 8) ? x_ptr[y * rowstride + 0 * rowstride + x + 1] : 0;
+  uint8_t r02 = (x + 2 < n / 8) ? x_ptr[y * rowstride + 0 * rowstride + x + 2] : 0;
 
-  uint8_t r10 = x_ptr[y * rowstride + 1 * rowstride + x + 0];
-  uint8_t r11 = (x + 1 < n) ? x_ptr[y * rowstride + 1 * rowstride + x + 1] : 0;
-  uint8_t r12 = (x + 2 < n) ? x_ptr[y * rowstride + 1 * rowstride + x + 2] : 0;
+  uint8_t r10 =                   x_ptr[y * rowstride + 1 * rowstride + x + 0];
+  uint8_t r11 = (x + 1 < n / 8) ? x_ptr[y * rowstride + 1 * rowstride + x + 1] : 0;
+  uint8_t r12 = (x + 2 < n / 8) ? x_ptr[y * rowstride + 1 * rowstride + x + 2] : 0;
 
-  uint8_t r20 = x_ptr[y * rowstride + 2 * rowstride + x + 0];
-  uint8_t r21 = (x + 1 < n) ? x_ptr[y * rowstride + 2 * rowstride + x + 1] : 0;
-  uint8_t r22 = (x + 2 < n) ? x_ptr[y * rowstride + 2 * rowstride + x + 2] : 0;
+  uint8_t r20 =                   x_ptr[y * rowstride + 2 * rowstride + x + 0];
+  uint8_t r21 = (x + 1 < n / 8) ? x_ptr[y * rowstride + 2 * rowstride + x + 1] : 0;
+  uint8_t r22 = (x + 2 < n / 8) ? x_ptr[y * rowstride + 2 * rowstride + x + 2] : 0;
 
   uint8_t v00_7 = (r00 >> 7) & 1;
   uint8_t v01_0 = (r01 >> 0) & 1;
@@ -55,7 +55,7 @@ __global__ void gol_kernel_bitpacked(const uint8_t* __restrict__ x_ptr, uint8_t*
   uint8_t v21_7 = (r21 >> 7) & 1;
   uint8_t v22_0 = (r22 >> 0) & 1;
 
-  uint8_t sum_0 = v00_7 + v01_0 + v01_1 + v10_7 + v11_0 + v11_1 + v20_7 + v21_1;
+  uint8_t sum_0 = v00_7 + v01_0 + v01_1 + v10_7 + v11_1 + v20_7 + v21_0 + v21_1;
   uint8_t sum_1 = v01_0 + v01_1 + v01_2 + v11_0 + v11_2 + v21_0 + v21_1 + v21_2;
   uint8_t sum_2 = v01_1 + v01_2 + v01_3 + v11_1 + v11_3 + v21_1 + v21_2 + v21_3;
   uint8_t sum_3 = v01_2 + v01_3 + v01_4 + v11_2 + v11_4 + v21_2 + v21_3 + v21_4;

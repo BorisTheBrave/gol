@@ -130,6 +130,11 @@ void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_
   TORCH_CHECK(out.size(0) == x.size(0), "out must have the same height");
   TORCH_CHECK(out.size(1) == x.size(1), "out must have the same width");
 
+  TORCH_CHECK(block_size_col % COL_GROUP_SIZE == 0, "block_size_col must be divisible by COL_GROUP_SIZE");
+  TORCH_CHECK(block_size_row % ROW_GROUP_SIZE == 0, "block_size_row must be divisible by ROW_GROUP_SIZE");
+  TORCH_CHECK(x.size(0) % COL_GROUP_SIZE == 0, "n must be divisible by COL_GROUP_SIZE");
+  TORCH_CHECK(x.size(1) % ROW_GROUP_SIZE == 0, "n must be divisible by ROW_GROUP_SIZE");
+
   const long n = x.size(0);
   int64_t row_words = (n + 63) >> 6;
   const int row_blocks  = (n - 2 + block_size_row - 1) / block_size_row;

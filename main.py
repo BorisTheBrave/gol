@@ -35,14 +35,14 @@ x[2, 3] = 1
 # x = gol_cuda_shared_memory(x)
 # visualize_heatmap(x[:6, : 6])
 
-x = gol_cuda_wideload(x)
-visualize_heatmap(x[:6, : 6])
-
-
-# x = longlong_encode(x)
-# x = gol_triton_64bit_1d(x)
-# x = longlong_decode(x)
+# x = gol_cuda_wideload(x)
 # visualize_heatmap(x[:6, : 6])
+
+
+x = longlong_encode(x)
+x = gol_cuda_grouped_bitpacked_64(x)
+x = longlong_decode(x)
+visualize_heatmap(x[:6, : 6])
 
 
 # %%

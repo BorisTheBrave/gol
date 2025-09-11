@@ -172,7 +172,7 @@ def gol_triton_8bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SIZ
     v21_7 = (row21 >> 7) & 1
     v22_0 = (row22 >> 0) & 1
 
-    sum_0 = v00_7 + v01_0 + v01_1 + v10_7 + v11_0 + v11_1 + v20_7 + v21_1
+    sum_0 = v00_7 + v01_0 + v01_1 + v10_7 + v11_1 + v20_7 + v21_0 + v21_1
     sum_1 = v01_0 + v01_1 + v01_2 + v11_0 + v11_2 + v21_0 + v21_1 + v21_2
     sum_2 = v01_1 + v01_2 + v01_3 + v11_1 + v11_3 + v21_1 + v21_2 + v21_3
     sum_3 = v01_2 + v01_3 + v01_4 + v11_2 + v11_4 + v21_2 + v21_3 + v21_4
@@ -298,10 +298,10 @@ def gol_triton_32bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SI
     sum30 = 0 # []
 
     # Now add in the bits that are missing
-    bit_1 = (row00 >> 31) + (row10 >> 31) + (row20 >> 31)
+    bit_1 =  (row00 >> 31)      +  (row10 >> 31)      +  (row20 >> 31)
     bit30 = ((row01 >> 30) & 1) + ((row11 >> 30) & 1) + ((row21 >> 30) & 1)
-    bit31 = ((row01 >> 31) & 1) + ((row11 >> 31) & 1) + ((row21 >> 31) & 1)
-    bit32 = (row02 & 1) + (row12 & 1) + (row22 & 1)
+    bit31 =  (row01 >> 31)      +  (row11 >> 31)      +  (row21 >> 31)
+    bit32 =  (row02 & 1) +         (row12 & 1) +         (row22 & 1)
 
     sum_1 += bit_1
     sum28 += bit30
@@ -525,8 +525,8 @@ def gol_triton_64bit_1d_kernel(x_ptr, out_ptr, row_stride, N: tl.int64, BLOCK_SI
     sum62 = (b2 >> 60) & 0o77 # [62]
 
     # Now add in the bits that are missing
-    bit_1 = (row00 >> 31) + (row10 >> 31) + (row20 >> 31)
-    bit63 = ((row01 >> 63) & 1) + ((row11 >> 63) & 1) + ((row21 >> 63) & 1)
+    bit_1 = (row00 >> 63) + (row10 >> 63) + (row20 >> 63)
+    bit63 = (row01 >> 63) + (row11 >> 63) + (row21 >> 63)
     bit64 = (row02 & 1) + (row12 & 1) + (row22 & 1)
 
     sum_1 += bit_1

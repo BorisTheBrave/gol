@@ -159,8 +159,8 @@ def init_ext7():
 def gol_cuda_grouped_bitpacked_64(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
     if ext7 is None: init_ext7()
     if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
-        BLOCK_SIZE_ROW = 1
-        BLOCK_SIZE_COL = 1024
+        BLOCK_SIZE_ROW = 32
+        BLOCK_SIZE_COL = 4
     output = torch.empty_like(x)
     ext7.gol(x.view(torch.uint64), output.view(torch.uint64), BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
     return output

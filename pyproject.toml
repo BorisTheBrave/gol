@@ -10,6 +10,7 @@ dependencies = [
     "ninja>=1.13.0",
     "numpy>=2.3.2",
     "pandas>=2.3.2",
+    "pytest>=8.4.2",
     "torch>=2.8.0",
     "triton>=3.4.0",
 ]
