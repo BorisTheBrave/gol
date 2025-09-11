@@ -199,7 +199,7 @@ def init_ext():
     ext = load_inline(
         name="gol_ext",
         cpp_sources="",            # no separate C++ binding file
-        cuda_sources=[open("kernel.cpp").read()],   # contains both kernel and PYBIND11 module
+        cuda_sources=[open("gol_cuda.cpp").read()],   # contains both kernel and PYBIND11 module
         with_cuda=True,
         extra_cuda_cflags=["-O3"],
         verbose=True,
@@ -221,7 +221,7 @@ def init_ext2():
     ext2 = load_inline(
         name="gol2_ext",
         cpp_sources="",            # no separate C++ binding file
-        cuda_sources=[open("kernel2.cpp").read()],   # contains both kernel and PYBIND11 module
+        cuda_sources=[open("gol_cuda_shared_memory.cpp").read()],   # contains both kernel and PYBIND11 module
         with_cuda=True,
         extra_cuda_cflags=["-O3"],
         verbose=True,
@@ -240,7 +240,7 @@ def init_ext3():
     ext3 = load_inline(
         name="gol3_ext",
         cpp_sources="",            # no separate C++ binding file
-        cuda_sources=[open("kernel3.cpp").read()],   # contains both kernel and PYBIND11 module
+        cuda_sources=[open("gol_cuda_wideload.cpp").read()],   # contains both kernel and PYBIND11 module
         with_cuda=True,
         extra_cuda_cflags=["-O3"],
         verbose=True,
@@ -262,7 +262,7 @@ def init_ext4():
     ext4 = load_inline(
         name="gol4_ext",
         cpp_sources="",            # no separate C++ binding file
-        cuda_sources=[open("kernel4.cpp").read()],   # contains both kernel and PYBIND11 module
+        cuda_sources=[open("gol_cuda_grouped.cpp").read()],   # contains both kernel and PYBIND11 module
         with_cuda=True,
         extra_cuda_cflags=["-O3"],
         verbose=True,
@@ -285,7 +285,7 @@ def init_ext5():
     ext5 = load_inline(
         name="gol5_ext",
         cpp_sources="",            # no separate C++ binding file
-        cuda_sources=[open("kernel5.cpp").read()],   # contains both kernel and PYBIND11 module
+        cuda_sources=[open("gol_cuda_bitpacked.cpp").read()],   # contains both kernel and PYBIND11 module
         with_cuda=True,
         extra_cuda_cflags=["-O3"],
         verbose=True,
@@ -309,7 +309,7 @@ def init_ext6():
     ext6 = load_inline(
         name="gol6_ext",
         cpp_sources="",            # no separate C++ binding file
-        cuda_sources=[open("kernel6.cpp").read()],   # contains both kernel and PYBIND11 module
+        cuda_sources=[open("gol_cuda_bitpacked_64.cpp").read()],   # contains both kernel and PYBIND11 module
         with_cuda=True,
         extra_cuda_cflags=["-O3"],
         verbose=True,
@@ -333,7 +333,7 @@ def init_ext7():
     ext7 = load_inline(
         name="gol7_ext",
         cpp_sources="",            # no separate C++ binding file
-        cuda_sources=[open("kernel7.cpp").read()],   # contains both kernel and PYBIND11 module
+        cuda_sources=[open("gol_cuda_grouped_bitpacked_64.cpp").read()],   # contains both kernel and PYBIND11 module
         with_cuda=True,
         extra_cuda_cflags=["-O3"],
         verbose=True,
@@ -1065,7 +1065,7 @@ x[2, 3] = 1
 # x = gol_cuda_shared_memory(x)
 # visualize_heatmap(x[:6, : 6])
 
-x = gol_cuda_32bit(x)
+x = gol_cuda_wideload(x)
 visualize_heatmap(x[:6, : 6])
 
 
@@ -1093,8 +1093,8 @@ IS_ROOFLINE = False
         x_names=['N'],
         x_vals=[512 * i for i in range(2, 32 + 1, 2)],
         line_arg='provider',
-        line_vals=['torch', 'compiled_torch', 'triton', 'cuda', 'triton_32bit', 'cuda_shared_memory', 'cuda_32bit'],
-        line_names=['Torch', 'Compiled Torch', 'Triton', 'Cuda', 'Triton 32bit', 'Cuda Shared Memory', 'Cuda 32bit'],
+        line_vals=['torch', 'compiled_torch', 'triton', 'cuda', 'triton_32bit', 'cuda_shared_memory', 'cuda_wideload'],
+        line_names=['Torch', 'Compiled Torch', 'Triton', 'Cuda', 'Triton 32bit', 'Cuda Shared Memory', 'Cuda Wideload'],
         ylabel='ms',
         plot_name='gol main',
         args={}
@@ -1115,8 +1115,8 @@ def benchmark(provider, N):
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda(x), quantiles=quantiles, rep=500)
     elif provider == 'cuda_shared_memory':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_shared_memory(x), quantiles=quantiles, rep=500)
-    elif provider == 'cuda_32bit':
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_32bit(x), quantiles=quantiles, rep=500)
+    elif provider == 'cuda_wideload':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_cuda_wideload(x), quantiles=quantiles, rep=500)
     elif provider == 'triton_8bit':
         x = bit_encode(x)
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: gol_triton_8bit_1d(x), quantiles=quantiles, rep=500)
