@@ -180,11 +180,11 @@ def init_ext8():
         verbose=True,
     )
 
-def gol_cuda_grouped_bitpacked_64_multistep(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None):
+def gol_cuda_grouped_bitpacked_64_multistep(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None, STEPS: int = 4):
     if ext8 is None: init_ext8()
     if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
         BLOCK_SIZE_ROW = 32
         BLOCK_SIZE_COL = 256
     output = torch.empty_like(x)
-    ext8.gol(x.view(torch.uint64), output.view(torch.uint64), BLOCK_SIZE_ROW, BLOCK_SIZE_COL)
+    ext8.gol(x.view(torch.uint64), output.view(torch.uint64), BLOCK_SIZE_ROW, BLOCK_SIZE_COL, STEPS)
     return output

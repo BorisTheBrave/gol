@@ -7,7 +7,6 @@
 
 #define COL_GROUP_SIZE 1
 #define ROW_GROUP_SIZE 4
-#define STEPS 4
 
 __device__ __forceinline__ void add2(uint64_t a, uint64_t b, uint64_t &s, uint64_t &c) {
     s = a ^ b;
@@ -41,12 +40,13 @@ void gol_kernel_bitpacked_64(const uint64_t* __restrict__ in,
                           uint64_t* __restrict__ out,
                           int64_t n,
                           int64_t in_row_stride,
-                          int64_t smem_stride)
+                          int64_t smem_stride,
+                          int64_t steps)
 {
     // Recover the dimensions used in the calling method
     int64_t word_n = (n + 63) >> 6;
-    int row_pad = STEPS;
-    int word_col_pad = cdiv(STEPS, 64);
+    int row_pad = steps;
+    int word_col_pad = cdiv(steps, 64);
 
     int block_size_row = blockDim.y * ROW_GROUP_SIZE;
     int word_block_size_col = blockDim.x * COL_GROUP_SIZE;
@@ -81,7 +81,7 @@ void gol_kernel_bitpacked_64(const uint64_t* __restrict__ in,
 
 
     // Now run k steps, using shared memory
-    for (int k = 0; k < STEPS; k++) {
+    for (int k = 0; k < steps; k++) {
         for (int j = 0; j < ROW_GROUP_SIZE; j++) {
             int ly = threadIdx.y * ROW_GROUP_SIZE + j;
 
@@ -194,7 +194,7 @@ int cdiv2(int a, int b) {
     return (a + b - 1) / b;
 }
 
-void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_col) {
+void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_col, int steps) {
   TORCH_CHECK(x.is_cuda(), "x must be CUDA tensors");
   TORCH_CHECK(x.stride(1) == 1, "colstride must be 1");
   TORCH_CHECK(x.dim() == 2, "x must be 2D");
@@ -221,14 +221,14 @@ void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_
   int64_t n = x.size(0);
   int64_t word_n = cdiv2(n, 64);
 
-  int64_t row_pad = STEPS;
-  int64_t word_col_pad = cdiv2(STEPS, 64);
+  int64_t row_pad = steps;
+  int64_t word_col_pad = cdiv2(steps, 64);
 
   int64_t block_write_size_row = block_size_row - 2 * row_pad;
   int64_t word_block_write_size_col = word_block_size_col - 2 * word_col_pad;
 
-  TORCH_CHECK(block_write_size_row > 0, "block_size_col have padding space for STEPS");
-  TORCH_CHECK(word_block_write_size_col > 0, "block_size_col/64 have padding space for STEPS");
+  TORCH_CHECK(block_write_size_row > 0, "block_size_col must have space for padding for steps");
+  TORCH_CHECK(word_block_write_size_col > 0, "block_size_col/64 must have space for padding for steps");
 
   
 
@@ -242,19 +242,19 @@ void gol(torch::Tensor x, torch::Tensor out, int block_size_row, int block_size_
 
   size_t shared_mem_size = block_size_row * word_block_size_col * sizeof(uint64_t) * 2;
 
-  printf("n: %zu\n", n);
-  printf("word_n: %zu\n", word_n);
-  printf("shared_mem_size: %zu\n", shared_mem_size);
-  printf("block_size_row: %d\n", block_size_row);
-  printf("word_block_size_col: %zu\n", word_block_size_col);
-  printf("block_size_col: %d\n", block_size_col);
-  printf("row_blocks: %zu\n", row_blocks);
-  printf("col_blocks: %zu\n", col_blocks);
-  printf("grid: %d, %d\n", grid.x, grid.y);
-  printf("block: %d, %d\n", block.x, block.y);
+//   printf("n: %zu\n", n);
+//   printf("word_n: %zu\n", word_n);
+//   printf("shared_mem_size: %zu\n", shared_mem_size);
+//   printf("block_size_row: %d\n", block_size_row);
+//   printf("word_block_size_col: %zu\n", word_block_size_col);
+//   printf("block_size_col: %d\n", block_size_col);
+//   printf("row_blocks: %zu\n", row_blocks);
+//   printf("col_blocks: %zu\n", col_blocks);
+//   printf("grid: %d, %d\n", grid.x, grid.y);
+//   printf("block: %d, %d\n", block.x, block.y);
 
   gol_kernel_bitpacked_64<<<grid, block, shared_mem_size, stream>>>(
-      x.data_ptr<uint64_t>(), out.data_ptr<uint64_t>(), n, x.stride(0), word_block_size_col);
+      x.data_ptr<uint64_t>(), out.data_ptr<uint64_t>(), n, x.stride(0), word_block_size_col, steps);
 
   auto err = cudaGetLastError();
   if (err != cudaSuccess) {

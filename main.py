@@ -50,7 +50,7 @@ x[2, 3] = 1
 
 
 x = longlong_encode(x)
-x = gol_cuda_grouped_bitpacked_64_multistep(x, BLOCK_SIZE_ROW=256, BLOCK_SIZE_COL=1024)
+x = gol_cuda_grouped_bitpacked_64_multistep(x, BLOCK_SIZE_ROW=16, BLOCK_SIZE_COL=1024)
 x = longlong_decode(x)
 visualize_heatmap(x[:6, : 6])
 
@@ -294,7 +294,10 @@ benchmark.run(print_data=True, show_plots=True)
 # %%
 # Test 2d block sizes
 
+import math
+
 TEST_FN = gol_cuda_grouped_bitpacked_64_multistep
+STEPS = 32
 # CUDA limit on threads is 1024 (10 bits)
 # grouped implementations add more bits for thie group
 # and bitpacked implementations add 3 or 6 bits
@@ -311,7 +314,7 @@ MAX_BLOCK_SIZE = {
 }[TEST_FN]
 MIN_BLOCK_SIZE_ROW = {
     gol_cuda_grouped_bitpacked_64: 2,
-    gol_cuda_grouped_bitpacked_64_multistep: 4,
+    gol_cuda_grouped_bitpacked_64_multistep: max(4, int(math.log2(STEPS))+ 2),
 }.get(TEST_FN, 0)
 MIN_BLOCK_SIZE_COL = {
     gol_cuda_wideload: 4,
@@ -346,7 +349,7 @@ def block_str(size):
         plot_name='gol 2d block sizes',
         args={}
     ))
-def benchmark(block_sizes, N):
+def benchmark(block_sizes, N, STEPS=STEPS):
     # create data
     x_shape = (N, N)
     x = (torch.randint(0, 1, x_shape, device=device, dtype=torch.int8))
@@ -356,7 +359,20 @@ def benchmark(block_sizes, N):
     print("BLOCK_SIZE_COL", BLOCK_SIZE_COL)
     if 'bitpacked' in TEST_FN.__name__:
         x = bit_encode(x)
-    ms, min_ms, max_ms = triton.testing.do_bench(lambda: TEST_FN(x, BLOCK_SIZE_ROW=BLOCK_SIZE_ROW, BLOCK_SIZE_COL=BLOCK_SIZE_COL), quantiles=quantiles, rep=500)
+    kwargs = {}
+    if 'multistep' in TEST_FN.__name__:
+        kwargs['STEPS'] = STEPS
+    ms, min_ms, max_ms = triton.testing.do_bench(lambda: TEST_FN(
+            x,
+            BLOCK_SIZE_ROW=BLOCK_SIZE_ROW,
+            BLOCK_SIZE_COL=BLOCK_SIZE_COL,
+            **kwargs),
+        quantiles=quantiles, rep=500)
+    # Average over steps
+    if 'multistep' in TEST_FN.__name__:
+        ms = ms / STEPS
+        min_ms = min_ms / STEPS
+        max_ms = max_ms / STEPS
     return ms, min_ms, max_ms
 
 result = benchmark.run(return_df=True, show_plots=False)
@@ -407,6 +423,9 @@ rect = Rectangle((min_col_idx - 0.5, min_row_idx - 0.5), 1, 1,
                  linewidth=3, edgecolor='red', facecolor='none')
 current_ax.add_patch(rect)
 
+fn_name = TEST_FN.__name__
+if 'multistep' in fn_name:
+    fn_name = fn_name + f" (STEPS={STEPS})"
 
 # Set ticks and labels for the axes
 plt.xticks(np.arange(len(sorted_col_sizes)), sorted_col_sizes)
@@ -414,7 +433,7 @@ plt.yticks(np.arange(len(sorted_row_sizes)), sorted_row_sizes)
 
 plt.xlabel("BLOCK_SIZE_COL")
 plt.ylabel("BLOCK_SIZE_ROW")
-plt.title(f"Execution Time for {TEST_FN.__name__} Block Sizes")
+plt.title(f"Execution Time for {fn_name} Block Sizes")
 
 # Add a colorbar to indicate the scale of execution times
 cbar = plt.colorbar()
@@ -427,7 +446,7 @@ for i in range(len(sorted_row_sizes)):
                  ha="center", va="center", color="w", fontsize=9) # White text for better contrast on viridis
 
 plt.tight_layout() # Adjust plot to ensure everything fits without overlapping
-plt.savefig(f"images/block_sizes_2d_{TEST_FN.__name__}.png")
+plt.savefig(f"images/block_sizes_2d_{fn_name}.png")
 plt.show()
 
 
