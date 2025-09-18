@@ -1,4 +1,8 @@
 # %%
+# %load_ext autoreload
+# %autoreload 2
+
+# %%
 import torch
 import triton
 import matplotlib.pyplot as plt
@@ -6,7 +10,7 @@ import numpy as np
 
 from utils import visualize_heatmap, bit_encode, bit_decode, long_encode, long_decode, longlong_encode, longlong_decode
 from gol_torch import gol_torch_conv2d, gol_torch_conv2d_compiled, gol_torch_conv2d_f16, gol_torch_conv2d_f16_compiled, gol_torch_sum, gol_torch_sum_compiled
-from gol_cuda import gol_cuda, gol_cuda_shared_memory, gol_cuda_wideload, gol_cuda_grouped, gol_cuda_bitpacked, gol_cuda_bitpacked_64, gol_cuda_grouped_bitpacked_64
+from gol_cuda import gol_cuda, gol_cuda_shared_memory, gol_cuda_wideload, gol_cuda_grouped, gol_cuda_bitpacked, gol_cuda_bitpacked_64, gol_cuda_grouped_bitpacked_64, gol_cuda_grouped_bitpacked_64_multistep
 from gol_triton import gol_triton_1d, gol_triton_2d, gol_triton_8bit_1d, gol_triton_32bit_1d, gol_triton_64bit_1d, gol_triton_2d_kernel
 
 device = torch.device('cuda:0')
@@ -39,8 +43,14 @@ x[2, 3] = 1
 # visualize_heatmap(x[:6, : 6])
 
 
+# x = longlong_encode(x)
+# x = gol_cuda_grouped_bitpacked_64(x)
+# x = longlong_decode(x)
+# visualize_heatmap(x[:6, : 6])
+
+
 x = longlong_encode(x)
-x = gol_cuda_grouped_bitpacked_64(x)
+x = gol_cuda_grouped_bitpacked_64_multistep(x, BLOCK_SIZE_ROW=256, BLOCK_SIZE_COL=1024)
 x = longlong_decode(x)
 visualize_heatmap(x[:6, : 6])
 
@@ -284,7 +294,11 @@ benchmark.run(print_data=True, show_plots=True)
 # %%
 # Test 2d block sizes
 
-TEST_FN = gol_cuda_grouped_bitpacked_64
+TEST_FN = gol_cuda_grouped_bitpacked_64_multistep
+# CUDA limit on threads is 1024 (10 bits)
+# grouped implementations add more bits for thie group
+# and bitpacked implementations add 3 or 6 bits
+# There seems to be a limit on multistep for allocating shared memory too.
 MAX_BLOCK_SIZE = {
     gol_cuda: 10, 
     gol_cuda_wideload: 12,
@@ -292,19 +306,30 @@ MAX_BLOCK_SIZE = {
     gol_cuda_grouped: 12,
     gol_cuda_bitpacked: 10,
     gol_cuda_bitpacked_64: 10,
-    gol_cuda_grouped_bitpacked_64: 12,
+    gol_cuda_grouped_bitpacked_64: 10 + 2 + 6,
+    gol_cuda_grouped_bitpacked_64_multistep: 10 + 2 + 6 - 1,
 }[TEST_FN]
+MIN_BLOCK_SIZE_ROW = {
+    gol_cuda_grouped_bitpacked_64: 2,
+    gol_cuda_grouped_bitpacked_64_multistep: 4,
+}.get(TEST_FN, 0)
+MIN_BLOCK_SIZE_COL = {
+    gol_cuda_wideload: 4,
+    gol_cuda_grouped: 4,
+    gol_cuda_grouped_bitpacked_64: 6,
+    gol_cuda_grouped_bitpacked_64_multistep: 8,
+}.get(TEST_FN, 0)
 IS_TRITON = TEST_FN == gol_triton_2d
 
 block_sizes = [
-    (1 * (2**i), 1 * (2**j)) for i in range(0, 9) for j in range(0, MAX_BLOCK_SIZE + 1)
+    (2**i, 2**j) for i in range(0, MAX_BLOCK_SIZE) for j in range(0, MAX_BLOCK_SIZE + 1)
     # CUDA has a limit on the number of threads
     if i + j <= MAX_BLOCK_SIZE
     # Warp size 32, rarely any point trying lower than that
     if i + j >= 5
     # Some kernels have frequirements on the multiple of the block size.
-    if (j >= 2 if TEST_FN in [gol_cuda_wideload, gol_cuda_grouped] else True)
-    if (i >= 2 if TEST_FN in [gol_cuda_grouped_bitpacked_64] else True)
+    if j >= MIN_BLOCK_SIZE_COL
+    if i >= MIN_BLOCK_SIZE_ROW
 ]
 def block_str(size):
     return str(size[0]) + "x" + str(size[1])
@@ -326,10 +351,12 @@ def benchmark(block_sizes, N):
     x_shape = (N, N)
     x = (torch.randint(0, 1, x_shape, device=device, dtype=torch.int8))
     quantiles = [0.5, 0.2, 0.8]
-    print(block_sizes)
+    BLOCK_SIZE_ROW, BLOCK_SIZE_COL = block_sizes
+    print("BLOCK_SIZE_ROW", BLOCK_SIZE_ROW)
+    print("BLOCK_SIZE_COL", BLOCK_SIZE_COL)
     if 'bitpacked' in TEST_FN.__name__:
         x = bit_encode(x)
-    ms, min_ms, max_ms = triton.testing.do_bench(lambda: TEST_FN(x, BLOCK_SIZE_ROW=block_sizes[0], BLOCK_SIZE_COL=block_sizes[1]), quantiles=quantiles, rep=500)
+    ms, min_ms, max_ms = triton.testing.do_bench(lambda: TEST_FN(x, BLOCK_SIZE_ROW=BLOCK_SIZE_ROW, BLOCK_SIZE_COL=BLOCK_SIZE_COL), quantiles=quantiles, rep=500)
     return ms, min_ms, max_ms
 
 result = benchmark.run(return_df=True, show_plots=False)

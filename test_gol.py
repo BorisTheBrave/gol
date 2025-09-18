@@ -11,7 +11,7 @@ from gol_torch import (
 from gol_cuda import (
     gol_cuda, gol_cuda_shared_memory, gol_cuda_wideload, 
     gol_cuda_grouped, gol_cuda_bitpacked, gol_cuda_bitpacked_64, 
-    gol_cuda_grouped_bitpacked_64
+    gol_cuda_grouped_bitpacked_64, gol_cuda_grouped_bitpacked_64_multistep
 )
 from gol_triton import (
     gol_triton_1d, gol_triton_2d, gol_triton_8bit_1d, 
@@ -29,9 +29,11 @@ class TestGameOfLife:
         """Use gol_torch_sum as the reference implementation."""
         return gol_torch_sum
     
-    def run_reference(self, pattern):
+    def run_reference(self, pattern, steps=1):
         """Run the reference implementation for comparison."""
-        return gol_torch_sum(pattern)
+        for _ in range(steps):
+            pattern = gol_torch_sum(pattern)
+        return pattern
     
     def compare_interiors(self, result, reference, original=None):
         """Compare only the interior cells, ignoring boundaries."""
@@ -218,6 +220,18 @@ class TestGameOfLife:
         decoded_result = longlong_decode(result)
         
         assert self.compare_interiors(decoded_result, reference_result, pattern), "gol_cuda_grouped_bitpacked_64 failed"
+    
+    def test_gol_cuda_grouped_bitpacked_64_multistep(self, reference_implementation):
+        """Test gol_cuda_grouped_bitpacked_64_multistep function."""
+        torch.manual_seed(42)
+        pattern = (torch.rand(2048, 2048, device=device) < 0.3).to(torch.int8)
+        
+        reference_result = self.run_reference(pattern, steps=4)
+        encoded_pattern = longlong_encode(pattern)
+        result = gol_cuda_grouped_bitpacked_64_multistep(encoded_pattern)
+        decoded_result = longlong_decode(result)
+        
+        assert self.compare_interiors(decoded_result, reference_result, pattern), "gol_cuda_grouped_bitpacked_64_multistep failed"
     
     def test_gol_triton_1d(self, reference_implementation):
         """Test gol_triton_1d function."""
