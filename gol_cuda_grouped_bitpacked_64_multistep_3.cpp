@@ -88,13 +88,12 @@ void gol_kernel_bitpacked_64(const uint64_t* __restrict__ in,
         // This array is small and always accessed by constant offsets after unrolling
         // so hopefully gets stored in registers
         uint64_t data[ROW_GROUP_SIZE + INNER_STEPS * 2][COL_GROUP_SIZE + 2];
-        // We're sigle buffered, so need separate buffer to store the output
-        // Note it's two rows smaller.
-        uint64_t data2[ROW_GROUP_SIZE + (INNER_STEPS - 1) * 2][COL_GROUP_SIZE + 2];
 
         // Load shared memory into data
+        #pragma unroll
         for (int i = 0; i < ROW_GROUP_SIZE + INNER_STEPS * 2; i++) {
             int ly = threadIdx.y * ROW_GROUP_SIZE + i - INNER_STEPS;
+            #pragma unroll
             for (int j = 0; j < COL_GROUP_SIZE + 2; j++) {
                 int lx = threadIdx.x * COL_GROUP_SIZE + j - 1;
                 if (ly < 0 || ly >= block_size_row || lx < 0 || lx >= word_block_size_col) {
@@ -110,25 +109,36 @@ void gol_kernel_bitpacked_64(const uint64_t* __restrict__ in,
         #pragma unroll
         for (int k2 = 0; k2 < INNER_STEPS; k2++) {
 
+            // First we pre-compute the sums of triples
+            uint64_t s[ROW_GROUP_SIZE + INNER_STEPS * 2][COL_GROUP_SIZE + 2];
+            uint64_t c[ROW_GROUP_SIZE + INNER_STEPS * 2][COL_GROUP_SIZE + 2];
+
+            #pragma unroll
+            for (int i = k2; i < ROW_GROUP_SIZE + INNER_STEPS * 2 - k2; i++) {
+                int x = k2 == INNER_STEPS - 1 ? 1 : 0;
+                #pragma unroll
+                for (int j = x; j < COL_GROUP_SIZE + 2 - x; j++) {
+                    uint64_t r1L = (j > 0) ?                      data[i + 0][j - 1] : 0ull;
+                    uint64_t r1C =                                data[i + 0][j + 0];
+                    uint64_t r1R = (j + 1 < COL_GROUP_SIZE + 2) ? data[i + 0][j + 1] : 0ull;
+                    uint64_t s1, c1; add3(shl1_carry(r1C, r1L), r1C, shr1_carry(r1C, r1R), s1, c1);
+                    s[i][j] = s1;
+                    c[i][j] = c1;
+                }
+            }
+
+            // Then we do the rest, given those
             #pragma unroll
             for (int i = k2 + 1; i < ROW_GROUP_SIZE + INNER_STEPS * 2 - k2 - 1; i++) {
                 int x = k2 == INNER_STEPS - 1 ? 1 : 0;
                 #pragma unroll
                 for (int j = x; j < COL_GROUP_SIZE + 2 - x; j++) {
-                    // Note some of these calculations are redundant across iterations.
-                    // But I'm not troubling to make even more register arrays
-                    uint64_t r0L = (j > 0) ?                      data[i - 1][j - 1] : 0ull;
-                    uint64_t r0C =                                data[i - 1][j + 0];
-                    uint64_t r0R = (j + 1 < COL_GROUP_SIZE + 2) ? data[i - 1][j + 1] : 0ull;
-                    uint64_t r1L = (j > 0) ?                      data[i + 0][j - 1] : 0ull;
-                    uint64_t r1C =                                data[i + 0][j + 0];
-                    uint64_t r1R = (j + 1 < COL_GROUP_SIZE + 2) ? data[i + 0][j + 1] : 0ull;
-                    uint64_t r2L = (j > 0) ?                      data[i + 1][j - 1] : 0ull;
-                    uint64_t r2C =                                data[i + 1][j + 0];
-                    uint64_t r2R = (j + 1 < COL_GROUP_SIZE + 2) ? data[i + 1][j + 1] : 0ull;
-                    uint64_t s0, c0; add3(shl1_carry(r0C, r0L), r0C, shr1_carry(r0C, r0R), s0, c0);
-                    uint64_t s1, c1; add3(shl1_carry(r1C, r1L), r1C, shr1_carry(r1C, r1R), s1, c1);
-                    uint64_t s2, c2; add3(shl1_carry(r2C, r2L), r2C, shr1_carry(r2C, r2R), s2, c2);
+                    uint64_t s0 = s[i - 1][j];
+                    uint64_t c0 = c[i - 1][j];
+                    uint64_t s1 = s[i + 0][j];
+                    uint64_t c1 = c[i + 0][j];
+                    uint64_t s2 = s[i + 1][j];
+                    uint64_t c2 = c[i + 1][j];
                     uint64_t bit0, cn; add3(s0, s1, s2, bit0, cn);
                     uint64_t t0, t1; add3(c0, c1, c2, t0, t1);
                     uint64_t csum0, t2; add2(t0, cn, csum0, t2);
@@ -136,23 +146,7 @@ void gol_kernel_bitpacked_64(const uint64_t* __restrict__ in,
                     uint64_t eq4 = (~csum2) & csum1 & (~csum0) & (~bit0);
                     uint64_t eq3 = (~csum2) & (~csum1) & csum0 & bit0;
                     uint64_t alive = data[i + 0][j + 0];
-                    data2[i - 1][j] = eq3 | (alive & eq4);
-                    // data2[i - 1][j] = in[2 * in_row_stride + 0];
-                    // data2[i - 1][j] = shared_in[i * smem_stride + 1];
-                    // data2[i - 1][j] = i;
-
-                }
-            }
-
-            if (k2 < INNER_STEPS - 1) {
-                // Copy the output to the input ready for the next innerstep
-                #pragma unroll
-                for (int i = k2 + 1; i < ROW_GROUP_SIZE + INNER_STEPS * 2 - k2 - 1; i++) {
-                    int x = k2 == INNER_STEPS - 1 ? 1 : 0;
-                    #pragma unroll
-                    for (int j = x; j < COL_GROUP_SIZE + 2 - x; j++) {
-                        data[i][j] = data2[i - 1][j];
-                    }
+                    data[i][j] = eq3 | (alive & eq4);
                 }
             }
         }
@@ -162,7 +156,7 @@ void gol_kernel_bitpacked_64(const uint64_t* __restrict__ in,
             int ly = threadIdx.y * ROW_GROUP_SIZE + i;
             for (int j = 0; j < COL_GROUP_SIZE ; j++) {
                 int lx = threadIdx.x * COL_GROUP_SIZE + j;
-                shared_out[ly * smem_stride + lx] = data2[i + INNER_STEPS - 1][j + 1];
+                shared_out[ly * smem_stride + lx] = data[i + INNER_STEPS][j + 1];
             }
         }
 
@@ -175,12 +169,14 @@ void gol_kernel_bitpacked_64(const uint64_t* __restrict__ in,
     }
 
     // Finally, write out shared memory
+    #pragma unroll
     for (int j = 0; j < ROW_GROUP_SIZE; j++) {
         int ly = threadIdx.y * ROW_GROUP_SIZE + j;
         int gy = blockIdx.y * block_write_size_row + ly - row_pad;
         // Don't write to the padding
         if (ly < row_pad || ly >= block_size_row - row_pad)
             continue;
+        #pragma unroll
         for (int i = 0; i < COL_GROUP_SIZE; i++) {
             int lx = threadIdx.x * COL_GROUP_SIZE + i;
             int gxw = blockIdx.x * word_block_write_size_col + lx - word_col_pad;
