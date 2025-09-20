@@ -10,18 +10,26 @@ import numpy as np
 
 from utils import visualize_heatmap, bit_encode, bit_decode, long_encode, long_decode, longlong_encode, longlong_decode
 from gol_torch import gol_torch_conv2d, gol_torch_conv2d_compiled, gol_torch_conv2d_f16, gol_torch_conv2d_f16_compiled, gol_torch_sum, gol_torch_sum_compiled
-from gol_cuda import gol_cuda, gol_cuda_shared_memory, gol_cuda_wideload, gol_cuda_grouped, gol_cuda_bitpacked, gol_cuda_bitpacked_64, gol_cuda_grouped_bitpacked_64, gol_cuda_grouped_bitpacked_64_multistep, gol_cuda_grouped_bitpacked_64_multistep_2
+from gol_cuda import gol_cuda, gol_cuda_shared_memory, gol_cuda_wideload, gol_cuda_grouped, gol_cuda_bitpacked, gol_cuda_bitpacked_64, gol_cuda_grouped_bitpacked_64, gol_cuda_grouped_bitpacked_64_multistep, gol_cuda_grouped_bitpacked_64_multistep_2, gol_cuda_grouped_bitpacked_64_multistep_3
 from gol_triton import gol_triton_1d, gol_triton_2d, gol_triton_8bit_1d, gol_triton_32bit_1d, gol_triton_64bit_1d, gol_triton_2d_kernel
 
 device = torch.device('cuda:0')
-
 # %%
+
 # Test data
 x = torch.tensor([[0, 0, 0, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 1, 0, 0], [0, 0, 0, 0, 0]]).to(torch.int8).to(device)
 x = torch.zeros((1024, 1024)).to(torch.int8).to(device)
-x[2, 1] = 1
-x[2, 2] = 1
+# x[2, 1] = 1
+# x[2, 2] = 1
+# x[2, 3] = 1
+
 x[2, 3] = 1
+x[3, 4] = 1
+x[4, 2] = 1
+x[4, 3] = 1
+x[4, 4] = 1
+
+
 # visualize_heatmap(x[:6, : 6])
 
 # x = gol_torch_conv2d_compiled(x)
@@ -54,10 +62,19 @@ x[2, 3] = 1
 # x = longlong_decode(x)
 # visualize_heatmap(x[:6, : 6])
 
+# x = longlong_encode(x)
+# x = gol_cuda_grouped_bitpacked_64_multistep_2(x, STEPS=2)
+# x = longlong_decode(x)
+visualize_heatmap(x[:8, : 8])
+
 x = longlong_encode(x)
-x = gol_cuda_grouped_bitpacked_64_multistep_2(x, STEPS=1)
+x = gol_cuda_grouped_bitpacked_64_multistep_3(x, BLOCK_SIZE_ROW=16, BLOCK_SIZE_COL=8192, STEPS=4)
 x = longlong_decode(x)
-visualize_heatmap(x[:6, : 6])
+visualize_heatmap(x[:8, : 8])
+
+# %%
+import sys
+# sys.exit()
 
 
 # %%
@@ -301,8 +318,8 @@ benchmark.run(print_data=True, show_plots=True)
 
 import math
 
-TEST_FN = gol_cuda_grouped_bitpacked_64_multistep_2
-STEPS = 16
+TEST_FN = gol_cuda_grouped_bitpacked_64_multistep_3
+STEPS = 32
 # CUDA limit on threads is 1024 (10 bits)
 # grouped implementations add more bits for thie group
 # and bitpacked implementations add 3 or 6 bits
@@ -317,11 +334,13 @@ MAX_BLOCK_SIZE = {
     gol_cuda_grouped_bitpacked_64: 10 + 2 + 6,
     gol_cuda_grouped_bitpacked_64_multistep: 10 + 2 + 6 - 1,
     gol_cuda_grouped_bitpacked_64_multistep_2: 10 + 2 + 6 - 1,
+    gol_cuda_grouped_bitpacked_64_multistep_3: 10 + 2 + 6 - 1,
 }[TEST_FN]
 MIN_BLOCK_SIZE_ROW = {
     gol_cuda_grouped_bitpacked_64: 2,
     gol_cuda_grouped_bitpacked_64_multistep: max(4, int(math.log2(STEPS))+ 2),
     gol_cuda_grouped_bitpacked_64_multistep_2: max(4, int(math.log2(STEPS))+ 2),
+    gol_cuda_grouped_bitpacked_64_multistep_3: max(4, int(math.log2(STEPS))+ 2),
 }.get(TEST_FN, 0)
 MIN_BLOCK_SIZE_COL = {
     gol_cuda_wideload: 4,
@@ -329,6 +348,7 @@ MIN_BLOCK_SIZE_COL = {
     gol_cuda_grouped_bitpacked_64: 6,
     gol_cuda_grouped_bitpacked_64_multistep: 8,
     gol_cuda_grouped_bitpacked_64_multistep_2: 8,
+    gol_cuda_grouped_bitpacked_64_multistep_3: 8,
 }.get(TEST_FN, 0)
 IS_TRITON = TEST_FN == gol_triton_2d
 

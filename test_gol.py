@@ -12,7 +12,7 @@ from gol_cuda import (
     gol_cuda, gol_cuda_shared_memory, gol_cuda_wideload, 
     gol_cuda_grouped, gol_cuda_bitpacked, gol_cuda_bitpacked_64, 
     gol_cuda_grouped_bitpacked_64, gol_cuda_grouped_bitpacked_64_multistep,
-    gol_cuda_grouped_bitpacked_64_multistep_2
+    gol_cuda_grouped_bitpacked_64_multistep_2, gol_cuda_grouped_bitpacked_64_multistep_3
 )
 from gol_triton import (
     gol_triton_1d, gol_triton_2d, gol_triton_8bit_1d, 
@@ -36,7 +36,7 @@ class TestGameOfLife:
             pattern = gol_torch_sum(pattern)
         return pattern
     
-    def compare_interiors(self, result, reference, original=None):
+    def compare_interiors(self, result, reference, original=None, steps=1):
         """Compare only the interior cells, ignoring boundaries."""
         # Many of our kernels behave badly on the boundaries, so we need to ignore them
         inset = 64
@@ -57,17 +57,17 @@ class TestGameOfLife:
                 first_pos = diff_positions[0]
                 first_row, first_col = first_pos[0].item(), first_pos[1].item()
                 
-                # Get 3x3 context (need to account for boundary offset)
+                # Get context (need to account for boundary offset)
                 orig_row, orig_col = first_row + inset, first_col + inset  # +1 because we removed boundary
-                expected_3x3 = reference[orig_row-1:orig_row+2, orig_col-1:orig_col+2].cpu().numpy()
-                actual_3x3 = result[orig_row-1:orig_row+2, orig_col-1:orig_col+2].cpu().numpy()
+                expected_3x3 = reference[orig_row-steps:orig_row+steps+1, orig_col-steps:orig_col+steps+1].cpu().numpy()
+                actual_3x3 = result[orig_row-steps:orig_row+steps+1, orig_col-steps:orig_col+steps+1].cpu().numpy()
                 
                 diff_details.append(f"  First difference at position (0x{orig_row:x}, 0x{orig_col:x}):")
                 if original is not None:
-                    before_3x3 = original[orig_row-1:orig_row+2, orig_col-1:orig_col+2].cpu().numpy()
-                    diff_details.append(f"    Before (3x3):\n{np.array2string(before_3x3, separator=', ')}")
-                diff_details.append(f"    Expected (3x3):\n{np.array2string(expected_3x3, separator=', ')}")
-                diff_details.append(f"    Actual (3x3):\n{np.array2string(actual_3x3, separator=', ')}")
+                    before_3x3 = original[orig_row-steps:orig_row+steps+1, orig_col-steps:orig_col+steps+1].cpu().numpy()
+                    diff_details.append(f"    Before:\n{np.array2string(before_3x3, separator=', ')}")
+                diff_details.append(f"    Expected:\n{np.array2string(expected_3x3, separator=', ')}")
+                diff_details.append(f"    Actual:\n{np.array2string(actual_3x3, separator=', ')}")
                 
                 # Show remaining differences
                 for i in range(1, num_diffs_to_show):
@@ -233,7 +233,7 @@ class TestGameOfLife:
         result = gol_cuda_grouped_bitpacked_64_multistep(encoded_pattern, STEPS=steps)
         decoded_result = longlong_decode(result)
         
-        assert self.compare_interiors(decoded_result, reference_result, pattern), "gol_cuda_grouped_bitpacked_64_multistep failed"
+        assert self.compare_interiors(decoded_result, reference_result, pattern, steps=steps), "gol_cuda_grouped_bitpacked_64_multistep failed"
     
     def test_gol_cuda_grouped_bitpacked_64_multistep_2(self, reference_implementation):
         """Test gol_cuda_grouped_bitpacked_64_multistep function."""
@@ -246,8 +246,22 @@ class TestGameOfLife:
         result = gol_cuda_grouped_bitpacked_64_multistep_2(encoded_pattern, STEPS=steps)
         decoded_result = longlong_decode(result)
         
-        assert self.compare_interiors(decoded_result, reference_result, pattern), "gol_cuda_grouped_bitpacked_64_multistep failed"
+        assert self.compare_interiors(decoded_result, reference_result, pattern, steps=steps), "gol_cuda_grouped_bitpacked_64_multistep_2 failed"
     
+    def test_gol_cuda_grouped_bitpacked_64_multistep_3(self, reference_implementation):
+        """Test gol_cuda_grouped_bitpacked_64_multistep function."""
+        torch.manual_seed(42)
+        pattern = (torch.rand(2048, 2048, device=device) < 0.3).to(torch.int8)
+        steps = 2
+        
+        reference_result = self.run_reference(pattern, steps=steps)
+        encoded_pattern = longlong_encode(pattern)
+        result = gol_cuda_grouped_bitpacked_64_multistep_3(encoded_pattern, STEPS=steps)
+        decoded_result = longlong_decode(result)
+        
+        assert self.compare_interiors(decoded_result, reference_result, pattern, steps=steps), "gol_cuda_grouped_bitpacked_64_multistep_3 failed"
+    
+
     def test_gol_triton_1d(self, reference_implementation):
         """Test gol_triton_1d function."""
         torch.manual_seed(42)

@@ -194,7 +194,7 @@ ext9 = None
 def init_ext9():
     global ext9
     ext9 = load_inline(
-        name="gol8_ext",
+        name="gol9_ext",
         cpp_sources="",            # no separate C++ binding file
         cuda_sources=[open("gol_cuda_grouped_bitpacked_64_multistep_2.cpp").read()],   # contains both kernel and PYBIND11 module
         with_cuda=True,
@@ -209,4 +209,28 @@ def gol_cuda_grouped_bitpacked_64_multistep_2(x: torch.Tensor, BLOCK_SIZE_ROW: i
         BLOCK_SIZE_COL = 256
     output = torch.empty_like(x)
     ext9.gol(x.view(torch.uint64), output.view(torch.uint64), BLOCK_SIZE_ROW, BLOCK_SIZE_COL, STEPS)
+    return output
+
+# %%
+ext10 = None 
+
+def init_ext10():
+    global ext10
+    ext10 = load_inline(
+        name="gol10_ext",
+        cpp_sources="",            # no separate C++ binding file
+        cuda_sources=[open("gol_cuda_grouped_bitpacked_64_multistep_3.cpp").read()],   # contains both kernel and PYBIND11 module
+        with_cuda=True,
+        extra_cuda_cflags=["-O3"],
+        # extra_cuda_cflags=["-O3 -G -lineinfo"],
+        verbose=True,
+    )
+
+def gol_cuda_grouped_bitpacked_64_multistep_3(x: torch.Tensor, BLOCK_SIZE_ROW: int = None, BLOCK_SIZE_COL: int = None, STEPS: int = 4):
+    if ext10 is None: init_ext10()
+    if BLOCK_SIZE_ROW is None and BLOCK_SIZE_COL is None:
+        BLOCK_SIZE_ROW = 32
+        BLOCK_SIZE_COL = 256
+    output = torch.empty_like(x)
+    ext10.gol(x.view(torch.uint64), output.view(torch.uint64), BLOCK_SIZE_ROW, BLOCK_SIZE_COL, STEPS)
     return output
