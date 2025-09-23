@@ -492,20 +492,63 @@ durations = {
     "Naive CUDA\n$(1\\times128)$": 26,
     "Naive Triton\n$(4\\times256)$": 22.5,
     "Grouped CUDA\n$(1\\times512)$": 14.7,
-    "Bitpacked 8-bit Triton\n$(1\\times128)$": 14.9,
-    "Bitpacked 32-bit Triton\n$(1\\times256)$": 5.21,
-    "Bitpacked 64-bit CUDA\n$(1\\times1024)$": 1.84,
+    "8-bit Triton\n$(1\\times128)$": 14.9,
+    "32-bit Triton\n$(1\\times256)$": 5.21,
+    "64-bit CUDA\n$(32\\times256)$": 1.84,
+    "64-bit CUDA Multistep\n$(128\\times1024)@8$": 0.68,
+    "64-bit CUDA Multistep Opt\n$(128\\times1024)@8$": 0.51,
 }
 
-labels = list(durations.keys())[1:]
-values = list(durations.values())[1:]
+labels = list(durations.keys())
+values = list(durations.values())
+
+colors = []
+for label in labels:
+    if "Multistep" in label:
+        colors.append('#FFCCB3')  # Pastel Orange
+    elif "bit" in label:
+        colors.append('#AEC6CF')  # Pastel Blue
+    else:
+        colors.append('#C1E1C1')  # Pastel Green
+
+
+# Show theoritcal limits
+for k, v, color in zip(labels, values, colors):
+    if "Multistep" in k:
+        height = 1.4 / 8
+        line_color = '#E69966'
+    elif "bit" in k:
+        height = 1.4
+        line_color = '#8EA6AF'
+    else:
+        height = 11.5
+        line_color = '#A1C1A1'
+            # Default bar width for matplotlib bar plots is 0.8
+    bar_width = 0.8
+    half_bar_width = bar_width / 2
+
+    plt.hlines(y=height, xmin=labels.index(k) - half_bar_width, xmax=labels.index(k) + half_bar_width,
+            color=line_color, label='_hidden_')
+
+import matplotlib.patches as mpatches
+
+# Add the legend to the plot
+multistep_patch = mpatches.Patch(color='#FFCCB3', label='Multistep')
+bit_patch = mpatches.Patch(color='#AEC6CF', label='Bit-packed')
+other_patch = mpatches.Patch(color='#C1E1C1', label='Other')
+plt.legend(handles=[multistep_patch, bit_patch, other_patch], loc='upper right')
+
+
 plt.text(0.5, 0.95, "(lower is better)", ha='center', va='top', transform=plt.gca().transAxes, fontsize=10)
 
-plt.bar(labels, values, color='skyblue')
-plt.ylabel("Execution Time (ms)")
-plt.xlabel("Optimal block size shown as (rows$\\times$cols)")
+plt.bar(labels, values, color=colors)
+plt.yscale('log')# Use log scale for the y-axis
+plt.ylabel("Execution Time / step (ms)")
+plt.xlabel("Optimal block size in cells shown as $(\\text{rows}\\times\\text{cols})@\\text{steps}$")
 plt.title("Game of Life Implementations Performance ($N=2^{16}$, device=A40)")
 plt.xticks(rotation=45, ha='right') # Rotate labels for better readability
 plt.grid(axis='y', linestyle='--', alpha=0.7) # Add a grid for easier comparison
+plt.ylim(bottom=1.4/8*0.8, top=plt.ylim()[1])
 plt.tight_layout() # Adjust layout to prevent labels from overlapping
 plt.show()
+plt.savefig("images/summary.png")
